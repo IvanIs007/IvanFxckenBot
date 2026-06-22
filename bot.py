@@ -59,7 +59,7 @@ class AdminStates(StatesGroup):
     waiting_for_user_id = State()
     waiting_for_direct_msg = State()
 
-# Фильтры
+# Фильтры проверки ролей
 async def is_admin_filter(message: Message) -> bool:
     if ADMIN_ID and message.from_user and message.from_user.id == ADMIN_ID:
         return True
@@ -111,7 +111,33 @@ def users_page_keyboard(page: int, total_pages: int) -> InlineKeyboardMarkup:
     ])
 
 # ──────────────────────────────────────────────
-# Хэндлеры команд
+# База Данных твоих треков (Сюда вставлять ID)
+# ──────────────────────────────────────────────
+
+def tracks_inline_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🎵 Заводной Поллинг (Hardstyle Mix)", callback_data="track:polling")],
+        [InlineKeyboardButton(text="🎵 Порт 10000 и одна ночь", callback_data="track:port")],
+        [InlineKeyboardButton(text="🎵 Логи на Максимум (Hyperpop Edit)", callback_data="track:logs")],
+        [InlineKeyboardButton(text="🎵 Веб-Сервер в огне", callback_data="track:server")],
+        [InlineKeyboardButton(text="🎵 Кубики Судьбы (Happy Hardcore)", callback_data="track:dice")],
+    ])
+
+def get_tracks_database() -> dict[str, str]:
+    """
+    Сюда ты будешь вписывать полученные от бота file_id.
+    Просто сотри текст ЗАМЕНИ_НА_FILE_ID и вставь туда длинную строку, которую пришлет бот.
+    """
+    return {
+        "polling": "ЗАМЕНИ_НА_FILE_ID",
+        "port": "ЗАМЕНИ_НА_FILE_ID",
+        "logs": "ЗАМЕНИ_НА_FILE_ID",
+        "server": "ЗАМЕНИ_НА_FILE_ID",
+        "dice": "ЗАМЕНИ_НА_FILE_ID",
+    }
+
+# ──────────────────────────────────────────────
+# Хэндлеры команд админа
 # ──────────────────────────────────────────────
 
 @dp.message(CommandStart(), is_admin_filter)
@@ -122,9 +148,10 @@ async def cmd_start_admin(message: Message) -> None:
     await message.answer(
         f"👋 Здарова, босс! Твоя админка готова.\n"
         f"Твой chat ID зафиксирован: <code>{message.chat.id}</code>\n\n"
-        "⚡️ <b>Автоматический чат активен:</b> всё, что пишут юзеры, будет падать сюда.\n"
-        "Чтобы ответить пользователю — просто сделай <b>REPLY (Ответ)</b> на его сообщение.\n\n"
-        "Команда /panel откроет панель управления рассылками и базой.",
+        "⚡️ <b>Автоматический чат активен:</b> всё, что пишут юзеры, летит сюда.\n"
+        "Чтобы ответить пользователю — просто сделай <b>REPLY (Ответ)</b> на сообщение.\n\n"
+        "📥 <b>Перехват треков включен:</b> если скинешь в бота любой .mp3 файл, он пришлет тебе его ID для базы данных треков.\n\n"
+        "Команда /panel откроет настройки рассылок.",
         parse_mode="HTML",
     )
 
@@ -140,7 +167,7 @@ async def cmd_panel(message: Message) -> None:
     await message.answer("⚙️ <b>Панель управления IvanFuckenBot</b>", parse_mode="HTML", reply_markup=admin_panel_keyboard())
 
 # ──────────────────────────────────────────────
-# Логика автоматического чата (Пересылка админу)
+# Логика пересылки и автоматического перехвата ID треков
 # ──────────────────────────────────────────────
 
 def track_user(message: Message) -> None:
@@ -174,23 +201,40 @@ async def forward_to_admin(message: Message) -> None:
     try:
         if message.text:
             sent = await bot.send_message(chat_id=admin_chat_id, text=header + message.text, parse_mode="HTML")
+        
+        elif message.audio:  # Если тебе или боту прислали аудиофайл
+            sent = await bot.send_audio(chat_id=admin_chat_id, audio=message.audio.file_id, caption=header + (message.caption or ""), parse_mode="HTML")
+            # Сразу же дублируем админу чистый file_id отдельным сообщением
+            await bot.send_message(
+                chat_id=admin_chat_id,
+                text=f"🎵 <b>ID аудиозаписи для вставки в код:</b>\n<code>{message.audio.file_id}</code>\n\n<i>Нажми на код выше, чтобы скопировать его.</i>",
+                parse_mode="HTML"
+            )
+            
+        elif message.document:  # На случай, если mp3 скинули файлом без сжатия
+            sent = await bot.send_document(chat_id=admin_chat_id, document=message.document.file_id, caption=header + (message.caption or ""), parse_mode="HTML")
+            if message.document.mime_type and "audio" in message.document.mime_type:
+                await bot.send_message(
+                    chat_id=admin_chat_id,
+                    text=f"📄 <b>ID аудио-документа для вставки в код:</b>\n<code>{message.document.file_id}</code>",
+                    parse_mode="HTML"
+                )
+                
         elif message.photo:
             sent = await bot.send_photo(chat_id=admin_chat_id, photo=message.photo[-1].file_id, caption=header + (message.caption or ""), parse_mode="HTML")
-        elif message.document:
-            sent = await bot.send_document(chat_id=admin_chat_id, document=message.document.file_id, caption=header + (message.caption or ""), parse_mode="HTML")
         elif message.voice:
             sent = await bot.send_voice(chat_id=admin_chat_id, voice=message.voice.file_id, caption=header + (message.caption or ""), parse_mode="HTML")
         elif message.sticker:
             await bot.send_message(chat_id=admin_chat_id, text=header + f"[Стикер {message.sticker.emoji or ''}]", parse_mode="HTML")
             sent = await bot.send_sticker(chat_id=admin_chat_id, sticker=message.sticker.file_id)
         else:
-            sent = await bot.send_message(chat_id=admin_chat_id, text=header + "[Другой тип медиафайлa]", parse_mode="HTML")
+            sent = await bot.send_message(chat_id=admin_chat_id, text=header + "[Другой тип медиафайла]", parse_mode="HTML")
 
         forward_map[sent.message_id] = message.chat.id
     except Exception as e:
         logger.error(f"Ошибка авто-пересылки админу: {e}")
 
-# Ответ админа через Reply
+# Ответ админа пользователю через функцию Reply (Ответ)
 @dp.message(is_admin_filter, F.reply_to_message)
 async def handle_admin_reply(message: Message) -> None:
     replied_id = message.reply_to_message.message_id
@@ -207,6 +251,8 @@ async def handle_admin_reply(message: Message) -> None:
             await bot.send_photo(chat_id=user_chat_id, photo=message.photo[-1].file_id, caption=message.caption)
         elif message.document:
             await bot.send_document(chat_id=user_chat_id, document=message.document.file_id, caption=message.caption)
+        elif message.audio:
+            await bot.send_audio(chat_id=user_chat_id, audio=message.audio.file_id, caption=message.caption)
         elif message.voice:
             await bot.send_voice(chat_id=user_chat_id, voice=message.voice.file_id, caption=message.caption)
         else:
@@ -226,7 +272,7 @@ async def cb_back_panel(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     await callback.message.answer("⚙️ <b>Панель управления IvanFuckenBot</b>", parse_mode="HTML", reply_markup=admin_panel_keyboard())
 
-# --- Массовая рассылка ---
+# Массовая рассылка всем юзерам из кэша
 @dp.callback_query(F.data == "broadcast")
 async def cb_broadcast(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
@@ -257,16 +303,18 @@ async def process_broadcast(message: Message, state: FSMContext):
                 await bot.send_photo(chat_id=uid, photo=message.photo[-1].file_id, caption=message.caption)
             elif message.document:
                 await bot.send_document(chat_id=uid, document=message.document.file_id, caption=message.caption)
+            elif message.audio:
+                await bot.send_audio(chat_id=uid, audio=message.audio.file_id, caption=message.caption)
             elif message.voice:
                 await bot.send_voice(chat_id=uid, voice=message.voice.file_id, caption=message.caption)
             success += 1
-            await asyncio.sleep(0.05)  # Защита от лимитов TG
+            await asyncio.sleep(0.05)
         except Exception:
             failed += 1
 
-    await message.answer(f"📊 <b>Рассылка завершена!</b>\n\n✅ Успешно: {success}\n❌ Ошибки (заблокировали бота): {failed}", parse_mode="HTML", reply_markup=admin_panel_keyboard())
+    await message.answer(f"📊 <b>Рассылка завершена!</b>\n\n✅ Успешно: {success}\n❌ Ошибки (заблокировали): {failed}", reply_markup=admin_panel_keyboard())
 
-# --- Отправка сообщения по ID ---
+# Отправка сообщения по ID
 @dp.callback_query(F.data == "direct_send")
 async def cb_direct_send(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
@@ -275,11 +323,15 @@ async def cb_direct_send(callback: CallbackQuery, state: FSMContext) -> None:
 
 @dp.message(AdminStates.waiting_for_user_id)
 async def process_user_id(message: Message, state: FSMContext):
+    if message.text == "/cancel":
+        await state.clear()
+        await message.answer("❌ Отменено.", reply_markup=admin_panel_keyboard())
+        return
     if not message.text or not message.text.isdigit():
         await message.answer("❌ ID должен состоять только из цифр. Попробуй ещё раз или отмени команду с помощью /cancel:")
         return
     await state.update_data(target_uid=int(message.text))
-    await message.answer(f"ID принят! Теперь отправь сообщение (текст, фото или документ), которое нужно передать пользователю {message.text}:")
+    await message.answer(f"ID принят! Теперь отправь сообщение (текст, фото, аудио или документ), которое нужно передать пользователю {message.text}:")
     await state.set_state(AdminStates.waiting_for_direct_msg)
 
 @dp.message(AdminStates.waiting_for_direct_msg)
@@ -295,13 +347,15 @@ async def process_direct_msg(message: Message, state: FSMContext):
             await bot.send_photo(chat_id=uid, photo=message.photo[-1].file_id, caption=message.caption)
         elif message.document:
             await bot.send_document(chat_id=uid, document=message.document.file_id, caption=message.caption)
+        elif message.audio:
+            await bot.send_audio(chat_id=uid, audio=message.audio.file_id, caption=message.caption)
         elif message.voice:
             await bot.send_voice(chat_id=uid, voice=message.voice.file_id, caption=message.caption)
-        await message.answer(f"✅ Сообщение успешно доставлено пользователю {uid}.", reply_markup=admin_panel_keyboard())
+        await message.answer(f"✅ Сообщение доставлено пользователю {uid}.", reply_markup=admin_panel_keyboard())
     except Exception as e:
-        await message.answer(f"❌ Не удалось отправить сообщение на ID {uid}. Ошибка: {e}", reply_markup=admin_panel_keyboard())
+        await message.answer(f"❌ Не удалось отправить на ID {uid}. Ошибка: {e}", reply_markup=admin_panel_keyboard())
 
-# --- Статистика и Юзеры ---
+# Статистика и управление пользователями
 @dp.callback_query(F.data == "stats")
 async def cb_stats(callback: CallbackQuery) -> None:
     await callback.answer()
@@ -338,10 +392,10 @@ async def cb_users_page(callback: CallbackQuery) -> None:
         for u in chunk:
             uname = f"@{u.username}" if u.username else "(нет юзернейма)"
             lines.append(f"⚫️ <b>{u.full_name}</b> {uname}\n  ID: <code>{u.chat_id}</code> | 💬 {u.msg_count} соб. | 🕐 {u.last_seen.strftime('%d.%m %H:%M')}")
-        text = f"👥 <b>Список пользователей (для отправки сообщений):</b>\n\n" + "\n\n".join(lines)
+        text = f"👥 <b>Список пользователей:</b>\n\n" + "\n\n".join(lines)
         markup = users_page_keyboard(page, total_pages)
 
-    await callback.message.answer(text, parse_mode="HTML", markup=markup)
+    await callback.message.answer(text, parse_mode="HTML", reply_markup=markup)
 
 @dp.callback_query(F.data == "noop")
 async def cb_noop(callback: CallbackQuery) -> None:
@@ -370,24 +424,15 @@ async def receive_new_greeting(message: Message, state: FSMContext) -> None:
     await message.answer(f"✅ Текст обновлен!\n\n<b>Теперь так:</b>\n{greeting_text}", parse_mode="HTML", reply_markup=admin_panel_keyboard())
 
 # ──────────────────────────────────────────────
-# Базовые функции пользователя
+# Логика отправки треков пользователям
 # ──────────────────────────────────────────────
 
 async def show_tracks(message: Message) -> None:
-    tracks_list = (
-        "🔥 <b>Список треков IvanFucken:</b>\n\n"
-        "1. Заводной Поллинг (Hardstyle Mix)\n"
-        "2. Порт 10000 и одна ночь\n"
-        "3. Логи на Максимум (Hyperpop Edit)\n"
-        "4. Веб-Сервер в огне\n"
-        "5. Кубики Судьбы (Happy Hardcore)\n"
+    await message.answer(
+        "🔥 <b>Выбирай любой трек IvanFucken ниже, и я скину тебе MP3:</b>",
+        parse_mode="HTML",
+        reply_markup=tracks_inline_keyboard()
     )
-    await message.answer(tracks_list, parse_mode="HTML")
-
-@dp.message(is_user_filter, F.text == BTN_START)
-async def btn_start(message: Message) -> None:
-    track_user(message)
-    await message.answer(greeting_text, reply_markup=user_keyboard())
 
 @dp.message(Command("tracks"), is_user_filter)
 async def cmd_tracks(message: Message) -> None:
@@ -398,6 +443,34 @@ async def cmd_tracks(message: Message) -> None:
 async def btn_tracks(message: Message) -> None:
     track_user(message)
     await show_tracks(message)
+
+# Хэндлер обработки нажатий на кнопки треков
+@dp.callback_query(F.data.startswith("track:"))
+async def handle_track_request(callback: CallbackQuery) -> None:
+    await callback.answer("Отправляю трек... 🎧")
+    
+    track_key = callback.data.split(":")[1]
+    chat_id = callback.message.chat.id
+    tracks_database = get_tracks_database()
+    file_to_send = tracks_database.get(track_key)
+
+    if not file_to_send or "ЗАМЕНИ_НА" in file_to_send:
+        await callback.message.answer("⚠️ Этот трек еще не загружен на сервер. Админ скоро всё поправит!")
+        return
+
+    try:
+        await bot.send_audio(
+            chat_id=chat_id, 
+            audio=file_to_send,
+            caption="Понравился трек? Качай и кидай друзьям! 😎"
+        )
+    except Exception as e:
+        logger.error(f"Ошибка отправки аудио: {e}")
+        await callback.message.answer("❌ Не удалось отправить файл. Что-то пошло не так.")
+
+# ──────────────────────────────────────────────
+# Игра в кости и остальные функции
+# ──────────────────────────────────────────────
 
 @dp.message(Command("luck"), is_user_filter)
 @dp.message(is_user_filter, F.text == BTN_LUCK)
@@ -414,7 +487,12 @@ async def cmd_luck(message: Message) -> None:
     except Exception as e:
         logger.error(f"/luck error: {e}")
 
-# Все остальные сообщения от обычных пользователей автоматически пересылаются админу!
+@dp.message(is_user_filter, F.text == BTN_START)
+async def btn_start(message: Message) -> None:
+    track_user(message)
+    await message.answer(greeting_text, reply_markup=user_keyboard())
+
+# Ловим все остальные сообщения от обычных юзеров и шлем админу
 @dp.message(is_user_filter)
 async def handle_user_message(message: Message) -> None:
     track_user(message)
