@@ -116,11 +116,11 @@ def users_page_keyboard(page: int, total_pages: int) -> InlineKeyboardMarkup:
 
 def tracks_inline_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🎵 Заводной Поллинг (Hardstyle Mix)", callback_data="track:polling")],
-        [InlineKeyboardButton(text="🎵 Порт 10000 и одна ночь", callback_data="track:port")],
-        [InlineKeyboardButton(text="🎵 Логи на Максимум (Hyperpop Edit)", callback_data="track:logs")],
-        [InlineKeyboardButton(text="🎵 Веб-Сервер в огне", callback_data="track:server")],
-        [InlineKeyboardButton(text="🎵 Кубики Судьбы (Happy Hardcore)", callback_data="track:dice")],
+        [InlineKeyboardButton(text="🎵 NOZHKI", callback_data="track:polling")],
+        [InlineKeyboardButton(text="", callback_data="track:port")],
+        [InlineKeyboardButton(text="")],
+        [InlineKeyboardButton(text="")],
+        [InlineKeyboardButton(text="", callback_data="track:dice")],
     ])
 
 def get_tracks_database() -> dict[str, str]:
@@ -129,7 +129,7 @@ def get_tracks_database() -> dict[str, str]:
     Просто сотри текст ЗАМЕНИ_НА_FILE_ID и вставь туда длинную строку, которую пришлет бот.
     """
     return {
-        "polling": "ЗАМЕНИ_НА_FILE_ID",
+        "polling": "CQACAgIAAxkBAAPPajlN7nMJSpTpJPIYjN6zEwovTaAAAhl3AAL_e7FJilKv06czpLg8BA",
         "port": "ЗАМЕНИ_НА_FILE_ID",
         "logs": "ЗАМЕНИ_НА_FILE_ID",
         "server": "ЗАМЕНИ_НА_FILE_ID",
