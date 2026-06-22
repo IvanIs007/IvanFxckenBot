@@ -87,12 +87,12 @@ async def start_cmd(message: Message):
         recent_chats[message.from_user.id] = message.from_user.full_name
         await message.answer(
             "✌️ Здарова! Я новый бот. Можешь послушать мои треки или рискнуть сыграть со мной в кости.\n\n"
-            "Ты можешь использовать кнопки ниже или команды в меню: /tracks и /dice.\n"
+            "Ты можете использовать кнопки ниже или команды в меню: /tracks и /dice.\n"
             "А если просто напишешь мне сообщение — его сразу прочитает админ!",
             reply_markup=get_user_kb()
         )
 
-# --- АДМИНСКИЕ КОМАНДЫ ДЛЯ ВЫЗОВА ФУНКЦИЙ ---
+# --- АДМИНСКИЕ ФУНКЦИИ (КОМАНДЫ) ---
 @dp.message(Command("panel"), F.from_user.id == ADMIN_ID)
 async def panel_cmd(message: Message):
     await message.answer("⚙️ Панель управления IvanFuckenBot:", reply_markup=get_admin_kb())
@@ -117,7 +117,7 @@ async def chats_cmd(message: Message):
     kb_buttons = [[InlineKeyboardButton(text=f"👤 {name}", callback_data=f"chat_with:{uid}")] for uid, name in recent_chats.items()]
     await message.answer("📝 <b>Выбери пользователя из недавних для отправки сообщения:</b>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_buttons))
 
-# --- ЮЗЕРСКИЕ КОМАНДЫ ДЛЯ ВЫЗОВА ФУНКЦИЙ ---
+# --- ЮЗЕРСКИЕ ФУНКЦИИ (КОМАНДЫ) ---
 @dp.message(Command("tracks"))
 async def user_tracks_cmd(message: Message):
     if not tracks_db:
@@ -143,37 +143,94 @@ async def user_dice_cmd(message: Message):
         result = "Ничья! 🤔 Я просто поддался."
     await bot.send_message(chat_id=chat_id, text=f"Твой результат: {u} 🎰 Мой результат: {b}\n\n{result}")
 
-# --- КОСТИ ИЗ CALLBACK КНОПКИ ---
+
+# --- СИНХРОНИЗАЦИЯ КНОПОК С КОМАНДАМИ (CALLBACK HANDLERS) ---
+
+@dp.callback_query(F.data == "list_tracks")
+async def list_tracks_callback(callback: CallbackQuery):
+    await callback.answer()
+    # Вызываем напрямую команду прослушивания треков
+    await user_tracks_cmd(callback.message)
+
 @dp.callback_query(F.data == "dice")
 async def dice_callback(callback: CallbackQuery):
     await callback.answer()
-    chat_id = callback.message.chat.id
-    await callback.message.answer("Ха, решил испытать удачу? Ну давай, кидаем кости! 👀")
-    user_dice = await bot.send_dice(chat_id=chat_id, emoji="🎲")
-    bot_dice = await bot.send_dice(chat_id=chat_id, emoji="🎲")
-    await asyncio.sleep(4)
-    u = user_dice.dice.value
-    b = bot_dice.dice.value
-    if u > b:
-        result = "Ты выиграл! 😳 Рандом на твоей стороне."
-    elif u < b:
-        result = "ТЫ ПРОИГРАЛ! 🤭 Против моих кубиков шансов нет."
-    else:
-        result = "Ничья! 🤔 Я просто поддался."
-    await bot.send_message(chat_id=chat_id, text=f"Твой результат: {u} 🎰 Мой результат: {b}\n\n{result}")
+    # Вызываем напрямую команду игры в кости
+    await user_dice_cmd(callback.message)
 
-# --- ИСТОРИЯ И CALLBACK-ИНТЕРФЕЙСЫ ---
+@dp.callback_query(F.data == "manage_tracks")
+async def manage_tracks_callback(callback: CallbackQuery):
+    await callback.answer()
+    # Вызываем админскую команду управления треками
+    await tracks_control_cmd(callback.message)
+
+@dp.callback_query(F.data == "broadcast_start")
+async def broadcast_start_cb(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    # Вызываем админскую команду рассылки
+    await broadcast_cmd(callback.message, state)
+
 @dp.callback_query(F.data == "recent_chats")
-async def show_recent(callback: CallbackQuery):
-    if not recent_chats:
-        await callback.answer("Список недавних диалогов пока пуст!", show_alert=True)
+async def show_recent_cb(callback: CallbackQuery):
+    await callback.answer()
+    # Вызываем админскую команду вывода недавних диалогов
+    await chats_cmd(callback.message)
+
+
+# --- ОСТАЛЬНАЯ ЛОГИКА И СЦЕНАРИИ ВВОДА ДАННЫХ ---
+
+@dp.callback_query(F.data == "add_track")
+async def add_track_start(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await callback.message.answer("Пришли мне mp3-файл трека:")
+    await state.set_state(AdminStates.waiting_for_track_file)
+
+@dp.message(AdminStates.waiting_for_track_file, F.audio)
+async def get_track_file(message: Message, state: FSMContext):
+    await state.update_data(file_id=message.audio.file_id)
+    await message.answer("Файл получен! Напиши его название:")
+    await state.set_state(AdminStates.waiting_for_track_name)
+
+@dp.message(AdminStates.waiting_for_track_name, F.text)
+async def get_track_name(message: Message, state: FSMContext):
+    data = await state.get_data()
+    tracks_db.append({"name": message.text, "file_id": data['file_id']})
+    await state.clear()
+    await message.answer(f"✅ Трек «<b>{message.text}</b>» успешно добавлен!", parse_mode="HTML", reply_markup=get_admin_kb())
+
+@dp.callback_query(F.data == "clear_tracks")
+async def clear_tracks(callback: CallbackQuery):
+    await callback.answer()
+    tracks_db.clear()
+    await callback.message.edit_text("🗑 Все треки удалены.", reply_markup=get_admin_kb())
+
+@dp.callback_query(F.data.startswith("play:"))
+async def play_track(callback: CallbackQuery):
+    idx = int(callback.data.split(":")[1])
+    await callback.answer("Загружаю... 🎧")
+    try:
+        await bot.send_audio(callback.message.chat.id, tracks_db[idx]['file_id'], caption="Понравился трек? Качай и делись с кентами! 😎")
+    except Exception as e:
+        logger.error(f"Ошибка воспроизведения: {e}")
+
+@dp.message(AdminStates.waiting_for_broadcast)
+async def process_broadcast(message: Message, state: FSMContext):
+    await state.clear()
+    if not users:
+        await message.answer("👥 База пуста.", reply_markup=get_admin_kb())
         return
-    kb_buttons = [[InlineKeyboardButton(text=f"👤 {name}", callback_data=f"chat_with:{uid}")] for uid, name in recent_chats.items()]
-    kb_buttons.append([InlineKeyboardButton(text="↩️ Назад", callback_data="back_admin")])
-    await callback.message.edit_text("📝 <b>Выбери пользователя из недавних:</b>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_buttons))
+    success = 0
+    for uid in list(users.keys()):
+        try:
+            await message.send_copy(chat_id=uid)
+            success += 1
+            await asyncio.sleep(0.05)
+        except: pass
+    await message.answer(f"📊 Рассылка завершена! Доставлено: {success}", reply_markup=get_admin_kb())
 
 @dp.callback_query(F.data.startswith("chat_with:"))
 async def start_chat_with(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
     uid = int(callback.data.split(":")[1])
     name = recent_chats.get(uid, "Пользователь")
     await state.update_data(target_uid=uid)
@@ -182,6 +239,7 @@ async def start_chat_with(callback: CallbackQuery, state: FSMContext):
 
 @dp.callback_query(F.data == "direct_send_start")
 async def direct_start(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
     await callback.message.answer("👤 Введи цифровой Telegram ID:")
     await state.set_state(AdminStates.waiting_for_direct_uid)
 
@@ -208,83 +266,9 @@ async def send_direct_msg(message: Message, state: FSMContext):
     except Exception as e:
         await message.answer(f"❌ Ошибка: {e}", reply_markup=get_admin_kb())
 
-# --- УПРАВЛЕНИЕ ТРЕКАМИ ИЗ ИНТЕРФЕЙСА ---
-@dp.callback_query(F.data == "manage_tracks")
-async def manage_tracks(callback: CallbackQuery):
-    await callback.message.edit_text(
-        f"🎵 <b>Управление треками</b>\n\nВсего треков в базе: {len(tracks_db)}",
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="➕ Добавить трек", callback_data="add_track")],
-            [InlineKeyboardButton(text="🗑 Очистить список", callback_data="clear_tracks")],
-            [InlineKeyboardButton(text="↩️ Назад", callback_data="back_admin")]
-        ])
-    )
-
-@dp.callback_query(F.data == "add_track")
-async def add_track_start(callback: CallbackQuery, state: FSMContext):
-    await callback.message.answer("Пришли мне mp3-файл трека:")
-    await state.set_state(AdminStates.waiting_for_track_file)
-
-@dp.message(AdminStates.waiting_for_track_file, F.audio)
-async def get_track_file(message: Message, state: FSMContext):
-    await state.update_data(file_id=message.audio.file_id)
-    await message.answer("Файл получен! Напиши его название:")
-    await state.set_state(AdminStates.waiting_for_track_name)
-
-@dp.message(AdminStates.waiting_for_track_name, F.text)
-async def get_track_name(message: Message, state: FSMContext):
-    data = await state.get_data()
-    tracks_db.append({"name": message.text, "file_id": data['file_id']})
-    await state.clear()
-    await message.answer(f"✅ Трек «<b>{message.text}</b>» успешно добавлен!", parse_mode="HTML", reply_markup=get_admin_kb())
-
-@dp.callback_query(F.data == "clear_tracks")
-async def clear_tracks(callback: CallbackQuery):
-    tracks_db.clear()
-    await callback.message.edit_text("🗑 Все треки удалены.", reply_markup=get_admin_kb())
-
-@dp.callback_query(F.data == "list_tracks")
-async def list_tracks_callback(callback: CallbackQuery):
-    if not tracks_db:
-        await callback.answer("Пока нет доступных треков!", show_alert=True)
-        return
-    kb_list = [[InlineKeyboardButton(text=f"🎵 {t['name']}", callback_data=f"play:{i}")] for i, t in enumerate(tracks_db)]
-    await callback.message.edit_text("🔥 <b>Выбирай любой трек IvanFucken:</b>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_list))
-
-@dp.callback_query(F.data.startswith("play:"))
-async def play_track(callback: CallbackQuery):
-    idx = int(callback.data.split(":")[1])
-    await callback.answer("Загружаю... 🎧")
-    try:
-        await bot.send_audio(callback.message.chat.id, tracks_db[idx]['file_id'], caption="Понравился трек? Качай и делись с кентами! 😎")
-    except Exception as e:
-        logger.error(f"Ошибка воспроизведения: {e}")
-
-# --- МАССОВАЯ РАССЫЛКА ИЗ КНОПКИ ---
-@dp.callback_query(F.data == "broadcast_start")
-async def broadcast_start_cb(callback: CallbackQuery, state: FSMContext):
-    await callback.message.answer("📢 Отправь мне сообщение для рассылки ВСЕМ юзерам:")
-    await state.set_state(AdminStates.waiting_for_broadcast)
-
-@dp.message(AdminStates.waiting_for_broadcast)
-async def process_broadcast(message: Message, state: FSMContext):
-    await state.clear()
-    if not users:
-        await message.answer("👥 База пуста.", reply_markup=get_admin_kb())
-        return
-    success = 0
-    for uid in list(users.keys()):
-        try:
-            await message.send_copy(chat_id=uid)
-            success += 1
-            await asyncio.sleep(0.05)
-        except: pass
-    await message.answer(f"📊 Рассылка завершена! Доставлено: {success}", reply_markup=get_admin_kb())
-
-# --- СТАТИСТИКА И НАВИГАЦИЯ ---
 @dp.callback_query(F.data == "view_stats")
 async def view_stats(callback: CallbackQuery):
+    await callback.answer()
     await callback.message.edit_text(
         f"📊 <b>Статистика бота</b>\n\n👥 Уникальных юзеров: <b>{len(users)}</b>\n🎵 Треков в меню: <b>{len(tracks_db)}</b>",
         parse_mode="HTML",
@@ -293,6 +277,7 @@ async def view_stats(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "back_admin")
 async def back_admin(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
     await state.clear()
     await callback.message.edit_text("⚙️ Панель управления IvanFuckenBot:", reply_markup=get_admin_kb())
 
@@ -311,7 +296,6 @@ async def admin_reply(message: Message):
         await message.answer("⚠️ Бот не определил юзера по этому реплаю. Используй команду /chats для прямой отправки.")
 
 # --- АВТОМАТИЧЕСКИЙ ЧАТ (ПЕРЕСЫЛКА СООБЩЕНИЙ АДМИНУ) ---
-# Важно: этот хэндлер стоит в самом конце, чтобы не перехватывать команды и админ-действия!
 @dp.message(F.chat.id != ADMIN_ID)
 async def chat_flow(message: Message):
     users[message.from_user.id] = message.from_user.full_name
