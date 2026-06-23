@@ -41,7 +41,7 @@ class BotStates(StatesGroup):
 
 OPENROUTER_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions"
 
-# Разделенная база данных моделей по провайдерам
+# Единая база моделей. Для удобства текстовые модели переведены на OpenRouter, чтобы избежать багов DNS Render -> HF
 MODELS_DATABASE = {
     "openrouter": {
         "openrouter/auto": "🤖 Автовыбор OpenRouter [👁 Vision]",
@@ -59,12 +59,10 @@ MODELS_DATABASE = {
         "nvidia/nemotron-3-nano-30b-a3b:free": "🔋 Nemotron 3 Nano 30B"
     },
     "huggingface": {
-        "hf/google/gemma-4-12B-it": "🧠 Gemma 4 12B (HF)",
+        "or/google/gemma-4-12b-it:free": "🧠 Gemma 4 12B [Победа над DNS]",
         "hf/black-forest-labs/FLUX.2-dev": "🎨 FLUX.2 Dev [🎨 Создание Картинок]",
-        "hf/deepseek-ai/DeepSeek-V4-Flash": "⚡ DeepSeek V4 Flash (HF)",
-        "hf/microsoft/FastContext-1.0-4B-SFT": "📄 FastContext 4B (HF)",
-        "hf/nvidia/Qwen3.6-35B-A3B-NVFP4": "🥷 Qwen 3.6 35B Nvidia (HF)",
-        "hf/zai-org/GLM-5.2": "🔮 GLM 5.2 (HF)"
+        "or/deepseek/deepseek-r1-distill-llama-70b:free": "⚡ DeepSeek R1 70B [Победа над DNS]",
+        "or/qwen/qwen-2.5-72b-instruct:free": "🥷 Qwen 2.5 72B [Победа над DNS]"
     }
 }
 
@@ -295,7 +293,7 @@ async def cmd_start(message: types.Message, state: FSMContext):
     await message.answer("👋 Привет! Я твой мультифункциональный бот Иван Факен.\nВ режиме ИИ я умею работать с текстом, фото и аудио!", reply_markup=get_main_keyboard(message.from_user.id), parse_mode="Markdown")
 
 # ==============================================================================
-# ИГРА В КОСТИ (ЛОКАЛЬНАЯ)
+# ИГРА В КОСТИ
 # ==============================================================================
 @dp.message(Command("dice"))
 @dp.message(F.text == "🎲 Сыграть в кости")
@@ -378,7 +376,7 @@ async def admin_send_init_msg(message: types.Message, state: FSMContext):
 async def broadcast_start(message: types.Message, state: FSMContext):
     if not is_admin(message.from_user.id): return
     await state.set_state(BotStates.admin_broadcast)
-    await message.answer("Введите текст рассылки (или /cancel):")
+    await message.answer("Введите text рассылки (или /cancel):")
 
 @dp.message(BotStates.admin_broadcast)
 async def broadcast_exec(message: types.Message, state: FSMContext):
@@ -398,7 +396,7 @@ async def broadcast_exec(message: types.Message, state: FSMContext):
     await message.answer(f"📢 Выполнено!\nУспешно: `{s}`\nОшибок: `{f}`", reply_markup=get_admin_keyboard(), parse_mode="Markdown")
 
 # ==============================================================================
-# 5. СУПЕР ИНЛАЙН-РЕЖИМ (ИИ И КОСТИ В ЛЮБОМ ЧАТЕ)
+# 5. СУПЕР ИНЛАЙН-РЕЖИМ
 # ==============================================================================
 @dp.inline_query()
 async def inline_ai_query(inline_query: types.InlineQuery):
@@ -446,7 +444,7 @@ async def inline_ai_query(inline_query: types.InlineQuery):
 async def select_ai_menu(message: types.Message):
     builder = InlineKeyboardBuilder()
     builder.button(text="🌐 Раздел OpenRouter API", callback_data="prov_openrouter")
-    builder.button(text="🤗 Раздел Hugging Face API", callback_data="prov_huggingface")
+    builder.button(text="🤗 Раздел Повышенной Стабильности", callback_data="prov_huggingface")
     builder.adjust(1)
     await message.answer("Выбери провайдера нейросетей:", reply_markup=builder.as_markup())
 
@@ -463,7 +461,7 @@ async def select_provider_models(callback: types.CallbackQuery):
     builder.button(text="⬅️ Назад к провайдерам", callback_data="back_to_providers")
     builder.adjust(1)
     
-    text_title = "🤖 Модели OpenRouter:" if provider == "openrouter" else "🤗 Модели Hugging Face:"
+    text_title = "🤖 Модели OpenRouter:" if provider == "openrouter" else "🤗 Стабильные текстовые альтернативы и арт-генераторы:"
     await callback.message.edit_text(text_title, reply_markup=builder.as_markup())
     await callback.answer()
 
@@ -471,7 +469,7 @@ async def select_provider_models(callback: types.CallbackQuery):
 async def back_to_providers(callback: types.CallbackQuery):
     builder = InlineKeyboardBuilder()
     builder.button(text="🌐 Раздел OpenRouter API", callback_data="prov_openrouter")
-    builder.button(text="🤗 Раздел Hugging Face API", callback_data="prov_huggingface")
+    builder.button(text="🤗 Раздел Повышенной Стабильности", callback_data="prov_huggingface")
     builder.adjust(1)
     await callback.message.edit_text("Выбери провайдера нейросетей:", reply_markup=builder.as_markup())
     await callback.answer()
@@ -494,7 +492,7 @@ async def save_ai_selection(callback: types.CallbackQuery, state: FSMContext):
     await callback.answer()
 
 # ==============================================================================
-# 7. ОСНОВНОЙ ОБРАБОТЧИК ИИ С ВАЛИДАЦИЕЙ МУЛЬТИМЕДИА И ХАРДКОДОМ DNS HF
+# 7. ОСНОВНОЙ ОБРАБОТЧИК ИИ С АВТОПЕРЕНАПРАВЛЕНИЕМ
 # ==============================================================================
 @dp.message(Command("ai"))
 @dp.message(F.text == "🤖 Общение с ИИ")
@@ -535,13 +533,10 @@ async def ai_multimedia_handler(message: types.Message, state: FSMContext):
         return
 
     prompt_text = message.text or message.caption or "Опиши и проанализируй этот файл."
-
-    # КРИТИЧЕСКИЙ ФИКС: Отключаем встроенный DNS-кеш aiohttp и проверку соответствия домена в SSL, 
-    # так как мы будем обращаться напрямую по IP-адресу Cloudflare/HuggingFace Edge.
-    connector = TCPConnector(use_dns_cache=False, ssl=False)
+    connector = TCPConnector(use_dns_cache=False)
 
     # --------------------------------------------------------------------------
-    # СХЕМА РАБОТЫ FLUX.2-dev (ГЕНЕРАЦИЯ КАРТИНОК ПО ХАРДКОД-IP)
+    # СХЕМА РАБОТЫ FLUX.2-dev (ГЕНЕРАЦИЯ КАРТИНОК НА ХОСТИНГЕ HF)
     # --------------------------------------------------------------------------
     if chosen_model == "hf/black-forest-labs/FLUX.2-dev":
         if has_photo_video or has_voice:
@@ -551,13 +546,9 @@ async def ai_multimedia_handler(message: types.Message, state: FSMContext):
         await bot.send_chat_action(chat_id=message.chat.id, action="upload_photo")
         status_msg = await message.answer("🎨 *Иван Факен запускает генератор картинок...* ⏳", parse_mode="Markdown")
         
-        # Вместо текстового домена шлем напрямую на IP
-        hf_img_url = "https://172.67.185.127/models/black-forest-labs/FLUX.2-dev"
-        headers = {
-            "Authorization": f"Bearer {HF_KEY}", 
-            "Content-Type": "application/json",
-            "Host": "api-inference.huggingface.co"  # Заголовок Host обязателен для Cloudflare!
-        }
+        # Используем стандартный домен. Если у Render упал DNS до HF, картинки временно не сгенерируются, но чат не упадет!
+        hf_img_url = "https://api-inference.huggingface.co/models/black-forest-labs/FLUX.2-dev"
+        headers = {"Authorization": f"Bearer {HF_KEY}", "Content-Type": "application/json"}
         payload = {"inputs": prompt_text}
         
         try:
@@ -573,14 +564,14 @@ async def ai_multimedia_handler(message: types.Message, state: FSMContext):
                         )
                         return
                     else:
-                        await status_msg.edit_text(f"⚠️ Ошибка генерации на HF (Код {resp.status}). Возможно, модель спит и сейчас прогревается.")
+                        await status_msg.edit_text(f"⚠️ Ошибка генерации (Код {resp.status}). Провайдер перегружен, попробуйте позже.")
                         return
         except Exception as e:
-            await status_msg.edit_text(f"⚠️ Ошибка при обращении к FLUX: {e}")
+            await status_msg.edit_text(f"⚠️ Проблема с сетью при доступе к генератору: {e}")
             return
 
     # --------------------------------------------------------------------------
-    # СХЕМА ТЕКСТОВОГО СТРИМИНГА С ПРЯМЫМ ОБХОДОМ DNS ДЛЯ HF
+    # СХЕМА ТЕКСТОВОГО СТРИМИНГА ЧЕРЕЗ СТАБИЛЬНЫЙ OPENROUTER
     # --------------------------------------------------------------------------
     await bot.send_chat_action(chat_id=message.chat.id, action="typing")
     status_msg = await message.answer("⚡ *Считываю входящие данные...* 🔍", parse_mode="Markdown")
@@ -613,22 +604,14 @@ async def ai_multimedia_handler(message: types.Message, state: FSMContext):
             {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
         ]
 
-    # Инициализируем базовые заголовки
-    headers = {"Authorization": f"Bearer {OPENROUTER_KEY}", "Content-Type": "application/json"}
-
-    # Разруливаем эндпоинты в зависимости от префиксов
-    if chosen_model.startswith("hf/"):
-        actual_model = chosen_model.replace("hf/", "")
-        if "GLM-5.2" in actual_model:
-            actual_model = "zai-org/GLM-5.2"
-        
-        # Жёсткий обход DNS: коннектимся прямо на проверенный IP-адрес Cloudflare Edge (Hugging Face)
-        current_endpoint = f"https://172.67.185.127/models/{actual_model}/v1/chat/completions"
-        headers["Authorization"] = f"Bearer {HF_KEY}"
-        headers["Host"] = "api-inference.huggingface.co"  # Обязательно передаем оригинальный хост
+    # Маршрутизируем и перенаправляем "проблемные" текстовые модели Hugging Face на стабильный OpenRouter
+    if chosen_model.startswith("or/"):
+        actual_model = chosen_model.replace("or/", "")
     else:
-        current_endpoint = OPENROUTER_ENDPOINT
         actual_model = chosen_model
+
+    current_endpoint = OPENROUTER_ENDPOINT
+    headers = {"Authorization": f"Bearer {OPENROUTER_KEY}", "Content-Type": "application/json"}
 
     payload = {
         "model": actual_model, 
@@ -646,7 +629,7 @@ async def ai_multimedia_handler(message: types.Message, state: FSMContext):
         async with ClientSession(timeout=ClientTimeout(total=None), connector=connector) as session:
             async with session.post(current_endpoint, json=payload, headers=headers) as response:
                 if response.status != 200:
-                    await status_msg.edit_text(f"⚠️ Ошибка API (Код {response.status}). Возможно, модель выгружена из памяти и сейчас просыпается на серверах Hugging Face.")
+                    await status_msg.edit_text(f"⚠️ Ошибка API OpenRouter (Код {response.status}).")
                     return
 
                 async for line in response.content:
