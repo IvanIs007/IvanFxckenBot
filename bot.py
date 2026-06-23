@@ -2,9 +2,6 @@ import asyncio
 import logging
 import os
 import threading
-import urllib.request
-import urllib.parse
-import json
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, BotCommand, BotCommandScopeChat, BotCommandScopeDefault
@@ -12,6 +9,9 @@ from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
+
+# Импортируем агрегатор нейросетей
+import g4f
 
 # --- НАСТРОЙКИ ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ---
 BOT_TOKEN = os.environ["BOT_TOKEN"]
@@ -31,7 +31,7 @@ recent_chats = {}
 forward_map = {}    
 ai_mode_users = set() 
 
-# Хранилище контекста диалогов для бесплатного ИИ (формат OpenAI-совместимый)
+# Хранилище контекста диалогов для агрегатора G4F
 ai_history = {}  # Структура: {user_id: [{"role": "user", "content": "..."}, ...]}
 
 class AdminStates(StatesGroup):
@@ -98,63 +98,49 @@ async def start_cmd(message: Message):
             reply_markup=get_user_kb()
         )
 
-# --- БЕСПЛАТНЫЙ ИИ С ПОДДЕРЖКОЙ ПОЛНОГО КОНТЕКСТА ЧЕРЕЗ JSON API ---
+# --- БЕСПЛАТНЫЙ ИИ С ПОДДЕРЖКОЙ КОНТЕКСТА ЧЕРЕЗ АГРЕГАТОР G4F ---
 async def ask_free_ai(user_id: int, prompt: str) -> str:
     try:
         # Инициализируем историю для пользователя, если её нет
         if user_id not in ai_history:
             ai_history[user_id] = [
-                {"role": "system", "content": "Ты — крутой ИИ-ассистент в боте IvanFuckenBot. Отвечай кратко, современно, используй сленг и пиши строго по делу. Ты ведешь полноценный непрерывный диалог и помнишь абсолютно все предыдущие сообщения пользователя."}
+                {"role": "system", "content": "Ты — крутой ИИ-ассистент в боте IvanFuckenBot. Отвечай кратко, современно, используй сленг и пиши строго по делу. Ты ведешь полноценный непрерывный диалог и помнишь всё, что пользователь писал ранее."}
             ]
             
         # Добавляем реплику пользователя в историю
         ai_history[user_id].append({"role": "user", "content": prompt})
         
+        # Функция вызова агрегатора G4F в синхронном режиме
         def _fetch():
-            # Используем официальный OpenAI-совместимый JSON эндпоинт Pollinations
-            url = "https://text.pollinations.ai/openai"
-            
-            # Формируем JSON-тело с моделью по умолчанию и полной историей сообщений
-            payload = {
-                "model": "openai",
-                "messages": ai_history[user_id],
-                "private": True
-            }
-            
-            data = json.dumps(payload).encode('utf-8')
-            
-            req = urllib.request.Request(
-                url,
-                data=data,
-                headers={
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
-                    'Content-Type': 'application/json'
-                },
-                method='POST'
+            response = g4f.ChatCompletion.create(
+                model=g4f.models.gpt_4o,  # Мощная модель, агрегатор сам выберет живой сервер
+                messages=ai_history[user_id],
+                stream=False
             )
-            
-            with urllib.request.urlopen(req, timeout=20) as response:
-                res_data = response.read().decode('utf-8')
-                # Парсим JSON-ответ от OpenAI формата Pollinations
-                res_json = json.loads(res_data)
-                return res_json['choices'][0]['message']['content']
+            return response
 
-        # Запускаем запрос в отдельном потоке
+        # Запускаем тяжелый запрос в отдельном потоке, чтобы бот не зависал
         reply = await asyncio.to_thread(_fetch)
         
-        if reply and reply.strip():
-            # Сохраняем ответ ассистента в историю, чтобы помнить его при следующем запросе
-            ai_history[user_id].append({"role": "assistant", "content": reply.strip()})
-            return reply.strip()
+        if reply and str(reply).strip():
+            reply_text = str(reply).strip()
+            # Записываем ответ ИИ в историю
+            ai_history[user_id].append({"role": "assistant", "content": reply_text})
             
-        return "⚠️ Не удалось получить ответ от ИИ. Попробуй еще раз!"
+            # Если диалог слишком длинный, мягко подрезаем его, сохраняя системный промт
+            if len(ai_history[user_id]) > 14:
+                ai_history[user_id] = [ai_history[user_id][0]] + ai_history[user_id][-10:]
+                
+            return reply_text
+            
+        return "⚠️ Не удалось получить ответ от агрегатора. Попробуй еще раз!"
         
     except Exception as e:
-        logger.error(f"Ошибка бесплатного ИИ: {e}")
-        # Если запрос упал, удаляем последнее сообщение юзера, чтобы не ломать хронологию при повторе
+        logger.error(f"Ошибка агрегатора G4F: {e}")
+        # В случае сбоя удаляем последний запрос юзера, чтобы не ломать хронологию
         if user_id in ai_history and len(ai_history[user_id]) > 1:
             ai_history[user_id].pop()
-        return "⚠️ Не удалось подключиться к серверам нейросети. Попробуй через минутку!"
+        return "⚠️ Все бесплатные сервера сейчас перегружены. Подожди пару секунд и отправь снова!"
 
 # --- КОМАНДЫ И CALLBACK ДЛЯ ИИ ---
 @dp.message(Command("grok"))
@@ -164,12 +150,12 @@ async def grok_command(message: Message, state: FSMContext):
         if not prompt:
             await message.answer("Использование для админа: <code>/grok твой вопрос</code>", parse_mode="HTML")
             return
-        msg = await message.answer("🔄 Нейросеть думает...")
+        msg = await message.answer("🔄 Агрегатор думает...")
         reply = await ask_free_ai(message.from_user.id, prompt)
         await msg.edit_text(reply)
     else:
         ai_mode_users.add(message.from_user.id)
-        await message.answer("🤖 <b>Режим общения с нейросетью активирован!</b>\n\nПиши мне любые вопросы, отвечу бесплатно и запомню весь наш диалог.", parse_mode="HTML", reply_markup=get_exit_ai_kb())
+        await message.answer("🤖 <b>Режим общения с нейросетью активирован!</b>\n\nПиши мне любые вопросы, отвечу бесплатно и запомню контекст диалога.", parse_mode="HTML", reply_markup=get_exit_ai_kb())
 
 @dp.callback_query(F.data == "grok_start")
 async def grok_start_callback(callback: CallbackQuery):
@@ -182,10 +168,10 @@ async def grok_stop_callback(callback: CallbackQuery):
     await callback.answer()
     if callback.from_user.id in ai_mode_users:
         ai_mode_users.remove(callback.from_user.id)
-    # Полностью очищаем историю общения при выходе из режима диалога
+    # Полностью очищаем память диалога при выходе
     if callback.from_user.id in ai_history:
         del ai_history[callback.from_user.id]
-    await callback.message.answer("❌ Режим ИИ выключен. Вся история текущего диалога очищена.", reply_markup=get_user_kb())
+    await callback.message.answer("❌ Режим ИИ выключен. Контекст диалога полностью сброшен.", reply_markup=get_user_kb())
 
 @dp.callback_query(F.data == "grok_admin")
 async def grok_admin_callback(callback: CallbackQuery):
