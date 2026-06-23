@@ -39,12 +39,22 @@ class BotStates(StatesGroup):
 
 OPENROUTER_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions"
 
+# ОБНОВЛЕННЫЙ СПИСОК НЕЙРОСЕТЕЙ ПО ТВОЕМУ ЗАПРОСУ
 MODELS_DATABASE = {
-    "openrouter/free": "🤖 Автовыбор OpenRouter",
-    "google/gemma-4-31b-it:free": "🧠 Google Gemma 4 31B IT",
     "openrouter/owl-alpha": "🦉 Owl Alpha (Agentic)",
-    "nvidia/nemotron-3-ultra:free": "⚡ Nemotron 3 Ultra",
-    "openai/gpt-oss-120b:free": "🌌 OpenAI gpt-oss-120b"
+    "nvidia/nemotron-3-ultra-550b-a55b:free": "⚡ Nemotron 3 Ultra 550B",
+    "google/gemma-4-31b-it:free": "🧠 Google Gemma 4 31B",
+    "openai/gpt-oss-20b:free": "🌌 OpenAI GPT OSS 20B",
+    "poolside/laguna-xs.2:free": "🌊 Poolside Laguna XS.2",
+    "openai/gpt-oss-120b:free": "🌌 OpenAI GPT OSS 120B",
+    "nvidia/nemotron-3-super-120b-a12b:free": "💥 Nemotron 3 Super 120B",
+    "poolside/laguna-m.1:free": "🌊 Poolside Laguna M.1",
+    "bytedance-seed/seedream-4.5": "🔮 ByteDance Seedream 4.5",
+    "google/gemma-4-26b-a4b-it:free": "🧠 Google Gemma 4 26B",
+    "nvidia/nemotron-nano-9b-v2:free": "🔋 Nemotron Nano 9B v2",
+    "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free": "🧩 Nemotron Omni Reasoning",
+    "cohere/north-mini-code:free": "💻 Cohere North Mini Code",
+    "nvidia/nemotron-3-nano-30b-a3b:free": "🔋 Nemotron 3 Nano 30B"
 }
 
 # ==============================================================================
@@ -98,11 +108,15 @@ async def set_bot_commands(user_id: int, is_adm: bool):
     except Exception: pass
 
 def get_or_set_admin(user_id: int) -> int:
+    """ИСПРАВЛЕНО: Записывает админа только ОДИН раз. Права больше не перезаписываются другим юзером"""
     if os.path.exists(ADMIN_FILE):
         with open(ADMIN_FILE, "r") as f:
             c = f.read().strip()
             if c.isdigit(): return int(c)
-    with open(ADMIN_FILE, "w") as f: f.write(str(user_id))
+    
+    # Если файла нет или он пустой, записываем текущего пользователя (самого первого)
+    with open(ADMIN_FILE, "w") as f: 
+        f.write(str(user_id))
     return user_id
 
 def is_admin(user_id: int) -> bool:
@@ -157,14 +171,10 @@ def get_admin_keyboard():
 # ==============================================================================
 # 4. СИНХРОННЫЙ ДИАЛОГ С АДМИНОМ (РЕПЛАИ И МОСТ)
 # ==============================================================================
-
-# ИСПРАВЛЕНО: Вместо BotStates.ai_mode == None используем корректный StateFilter(None)
 @dp.message(F.chat.type == "private", ~F.text.startswith("/"), lambda msg: not is_admin(msg.from_user.id))
 async def handle_user_chat_to_admin(message: types.Message, state: FSMContext):
-    # Проверяем состояние вручную во избежание конфликтов типов
     current_state = await state.get_state()
-    if current_state == BotStates.ai_mode.state:
-        return # Если юзер общается с ИИ, в админку слать не нужно
+    if current_state == BotStates.ai_mode.state: return 
 
     adm_id = get_admin_id()
     if not adm_id: return
@@ -207,6 +217,8 @@ async def handle_admin_reply_to_user(message: types.Message):
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message):
     save_user(message.from_user.id)
+    
+    # Инициализация админа происходит один раз при самом первом запуске
     current_admin = get_or_set_admin(message.from_user.id)
     adm_status = (current_admin == message.from_user.id)
     await set_bot_commands(message.from_user.id, adm_status)
@@ -308,21 +320,22 @@ async def broadcast_exec(message: types.Message, state: FSMContext):
     await message.answer(f"📢 Выполнено!\nУспешно: `{s}`\nОшибок: `{f}`", reply_markup=get_admin_keyboard(), parse_mode="Markdown")
 
 # ==============================================================================
-# 6. УЛЬТРА-ОБРАБОТЧИК ИИ (ИСПРАВЛЕННЫЙ)
+# 6. УЛЬТРА-ОБРАБОТЧИК ИИ
 # ==============================================================================
 @dp.message(Command("ai"))
 @dp.message(F.text == "🤖 Общение с ИИ")
 async def start_ai(message: types.Message, state: FSMContext):
     await state.set_state(BotStates.ai_mode)
     data = await state.get_data()
-    model = data.get("current_model", "openrouter/free")
+    model = data.get("current_model", "openrouter/owl-alpha")
     await message.answer(f"🤖 Режим ИИ запущен!\nПрисылайте текст, фотографии, видео или голосовые.", reply_markup=get_ai_keyboard())
 
 @dp.message(BotStates.ai_mode, F.text == "⚙️ Выбрать нейросеть")
 async def select_ai_menu(message: types.Message):
     builder = InlineKeyboardBuilder()
     for m_id, name in MODELS_DATABASE.items():
-        short = m_id.replace("free", "").replace("/", "-")[:20]
+        # Сокращаем callback_data, чтобы пролезать в лимиты Telegram
+        short = m_id.split("/")[-1].replace(":free", "")[:20]
         builder.button(text=name, callback_data=f"ai_{short}")
     builder.adjust(1)
     await message.answer("Выберите модель:", reply_markup=builder.as_markup())
@@ -330,13 +343,13 @@ async def select_ai_menu(message: types.Message):
 @dp.callback_query(F.data.startswith("ai_"))
 async def save_ai_selection(callback: types.CallbackQuery, state: FSMContext):
     short = callback.data.split("_")[1]
-    full = "openrouter/free"
+    full = "openrouter/owl-alpha"
     for m_id in MODELS_DATABASE.keys():
-        if short in m_id.replace("free", "").replace("/", "-"):
+        if short in m_id:
             full = m_id
             break
     await state.update_data(current_model=full)
-    await callback.message.edit_text(f"✅ Модель обновлена: **{MODELS_DATABASE[full]}**")
+    await callback.message.edit_text(f"✅ Модель actualizada: **{MODELS_DATABASE[full]}**")
     await callback.answer()
 
 @dp.message(BotStates.ai_mode, F.text == "❌ Выйти из режима ИИ")
@@ -352,17 +365,15 @@ async def ai_multimedia_handler(message: types.Message, state: FSMContext):
     status_msg = await message.answer("⚡ *Считываю входящие данные...* 🔍", parse_mode="Markdown")
 
     user_data = await state.get_data()
-    chosen_model = user_data.get("current_model", "openrouter/free")
+    chosen_model = user_data.get("current_model", "openrouter/owl-alpha")
     
     prompt_text = message.text or message.caption or "Опиши и проанализируй этот файл."
     base64_image = ""
 
-    # 1. ФОТО
     if message.photo:
         await status_msg.edit_text("📸 *Обрабатываю изображение...* ⚙️", parse_mode="Markdown")
         base64_image = await download_file_as_base64(message.photo[-1].file_id)
 
-    # 2. КРУЖОЧКИ И ВИДЕО
     elif message.video or message.video_note:
         await status_msg.edit_text("🎬 *Анализирую кадры видео...* ⚙️", parse_mode="Markdown")
         file_id = None
@@ -374,15 +385,13 @@ async def ai_multimedia_handler(message: types.Message, state: FSMContext):
         if file_id:
             base64_image = await download_file_as_base64(file_id)
         else:
-            await status_msg.edit_text("⚠️ Не удалось извлечь кадры видео. Попробуйте сменить модель.")
+            await status_msg.edit_text("⚠️ Не удалось извлечь миниатюру видео.")
             return
 
-    # 3. ГОЛОСОВЫЕ
     elif message.voice:
         await status_msg.edit_text("🎙 *Слушаю голосовое сообщение...* 💬", parse_mode="Markdown")
         prompt_text = f"[Голосовое сообщение]: Ответь пользователю на его аудио-запрос."
 
-    # Нагрузка
     content_payload = [{"type": "text", "text": prompt_text}]
     if base64_image:
         content_payload.append({
@@ -407,7 +416,7 @@ async def ai_multimedia_handler(message: types.Message, state: FSMContext):
         async with ClientSession(timeout=ClientTimeout(total=None)) as session:
             async with session.post(OPENROUTER_ENDPOINT, json=payload, headers=headers) as response:
                 if response.status != 200:
-                    await status_msg.edit_text("⚠️ Ошибка OpenRouter. Выберите другую модель.")
+                    await status_msg.edit_text("⚠️ Ошибка на OpenRouter. Модель перегружена или не поддерживает файлы.")
                     return
 
                 async for line in response.content:
@@ -439,9 +448,9 @@ async def ai_multimedia_handler(message: types.Message, state: FSMContext):
             try: await status_msg.edit_text(full_response, parse_mode="Markdown")
             except Exception: await status_msg.edit_text(full_response)
         else:
-            await status_msg.edit_text("⚠️ Не удалось получить ответ от ИИ.")
+            await status_msg.edit_text("⚠️ Не удалось получить ответ.")
     except Exception:
-        await status_msg.edit_text("⚠️ Ошибка сети при генерации.")
+        await status_msg.edit_text("⚠️ Внутренняя ошибка генерации.")
 
 # ==============================================================================
 # 7. ВЕБ-СЕРВЕР И СТАРТ
