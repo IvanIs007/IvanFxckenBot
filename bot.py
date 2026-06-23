@@ -157,19 +157,18 @@ async def admin_stats(message: types.Message):
     await message.answer(f"📊 **Статистика бота:**\n\nВсего уникальных пользователей: `{count}`")
 
 # ==============================================================================
-# 6. ХЕНДЛЕР ДЛЯ РАБОТЫ С OPENROUTER API (ДИНАМИЧЕСКИЙ ВЫБОР)
+# 6. ХЕНДЛЕР ДЛЯ РАБОТЫ С OPENROUTER API (ИСПРАВЛЕННЫЙ)
 # ==============================================================================
 @dp.message(BotStates.ai_mode)
-async def handle_ai_request(message: types.Message):
+async def handle_ai_request(message: types.Message, state: FSMContext):  # Добавили state сюда!
     if not message.text or message.text == "❌ Выйти из режима ИИ": return 
+    if message.text in AVAILABLE_MODELS.keys(): return # Игнорируем нажатия кнопок переключения
     
     await bot.send_chat_action(chat_id=message.chat.id, action="typing")
     
-    # Получаем сохраненную для пользователя модель (или берем автовыбор)
-    user_data = await state.get_data() if 'state' in locals() else {}
-    # В aiogram 3 context передается аргументом, вытащим модель безопасно:
-    current_state_data = await Dispatcher.get_current().fsm.get_data(cast(types.User, message.from_user))
-    chosen_model = current_state_data.get("current_model", "openrouter/free")
+    # Теперь безопасно берем выбранную модель из контекста состояния
+    user_data = await state.get_data()
+    chosen_model = user_data.get("current_model", "openrouter/free")
     
     payload = {
         "model": chosen_model, 
@@ -190,16 +189,20 @@ async def handle_ai_request(message: types.Message):
             async with session.post(OPENROUTER_ENDPOINT, json=payload, headers=headers, timeout=45) as response:
                 if response.status == 200:
                     data = await response.json()
-                    ai_text = data['choices'][0]['message']['content']
-                    await message.answer(ai_text)
+                    # Проверяем, вернул ли OpenRouter текст ответа
+                    if 'choices' in data and len(data['choices']) > 0:
+                        ai_text = data['choices'][0]['message']['content']
+                        await message.answer(ai_text)
+                    else:
+                        await message.answer("⚠️ Нейросеть вернула пустой ответ. Попробуйте еще раз.")
                 else:
                     error_data = await response.text()
                     print(f"Ошибка OpenRouter API: {error_data}")
-                    await message.answer(f"⚠️ Ошибка нейросети (Код {response.status}). Попробуйте сменить модель кнопками.")
+                    await message.answer(f"⚠️ Ошибка нейросети (Код {response.status}).")
     except Exception as e:
         print(f"Исключение при запросе: {e}")
-        await message.answer("⚠️ Ошибка отправки запроса к ИИ. Попробуйте еще раз.")
-
+        # Теперь бот напишет точную ошибку прямо в Телеграм, чтобы мы видели, что не так!
+        await message.answer(f"⚠️ Ошибка отправки запроса к ИИ: {str(e)}")
 # ==============================================================================
 # 7. ВЕБ-СЕРВЕР ДЛЯ СТАБИЛЬНОСТИ НА RENDER
 # ==============================================================================
