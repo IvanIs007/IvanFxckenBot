@@ -2,7 +2,6 @@ import asyncio
 import logging
 import os
 import threading
-import re
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, BotCommand, BotCommandScopeChat, BotCommandScopeDefault
@@ -97,65 +96,50 @@ async def start_cmd(message: Message):
             reply_markup=get_user_kb()
         )
 
-# --- ИСПРАВЛЕННЫЙ И НЕУБИВАЕМЫЙ ПАРСЕР DUCKDUCKGO AI ---
+# --- ЖЕЛЕЗОБЕТОННЫЙ БЕСПЛАТНЫЙ ИИ ЧЕРЕЗ POLLINATIONS ---
 async def ask_free_ai(user_id: int, prompt: str) -> str:
     try:
         if user_id not in ai_history:
-            ai_history[user_id] = []
+            ai_history[user_id] = [
+                {"role": "system", "content": "Ты — IvanFuckenBot, крутой ИИ-ассистент. Отвечай кратко, используй современный сленг, пиши строго на русском языке и по делу."}
+            ]
         
         ai_history[user_id].append({"role": "user", "content": prompt})
         
-        full_prompt = f"[Системная инструкция: Ты — IvanFuckenBot, дерзкий и крутой ИИ-ассистент. Отвечай коротко, используй молодежный сленг, пиши только на русском языке. Общайся в контексте диалога].\n\nПользователь: {prompt}"
+        # Отправляем чистый структурированный POST-запрос
+        url = "https://text.pollinations.ai/"
+        payload = {
+            "messages": ai_history[user_id],
+            "model": "openai-large",  # Мощная дефолтная модель, отлично держит контекст
+            "jsonMode": False
+        }
+        headers = {
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+        }
         
         async with aiohttp.ClientSession() as session:
-            # 1. Запрашиваем обязательный токен
-            init_headers = {
-                "x-client-variant": "chat",
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-            }
-            async with session.get("https://duckduckgo.com/duckchat/v1/status", headers=init_headers, timeout=10) as resp:
-                if resp.status != 200:
-                    return "⚠️ Ошибка инициализации DDG. Попробуй еще раз."
-                v_sn_token = resp.headers.get("x-vqd-4")
-            
-            # 2. Отправляем запрос к GPT-4o-Mini
-            headers = {
-                "Content-Type": "application/json",
-                "x-vqd-4": v_sn_token,
-                "Accept": "text/event-stream",
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-            }
-            
-            payload = {
-                "model": "gpt-4o-mini",
-                "messages": [{"role": "user", "content": full_prompt}] if len(ai_history[user_id]) <= 1 else ai_history[user_id]
-            }
-            
-            async with session.post("https://duckduckgo.com/duckchat/v1/chat", json=payload, headers=headers, timeout=15) as response:
+            async with session.post(url, json=payload, headers=headers, timeout=25) as response:
                 if response.status == 200:
-                    raw_text = await response.text()
+                    # Сервер возвращает сразу готовый текстовый ответ, без JSON оберток!
+                    reply_text = await response.text()
+                    reply_text = reply_text.strip()
                     
-                    # Прямое извлечение текста регуляркой вместо капризного json.loads
-                    reply_chunks = re.findall(r'"message"\s*:\s*"([^"]+)"', raw_text)
-                    
-                    if reply_chunks:
-                        # Собираем куски, заменяя экранированные переносы строк обратно
-                        reply_text = "".join(reply_chunks).replace("\\n", "\n").replace("\\" , "")
-                        reply_text = reply_text.strip()
+                    if reply_text:
+                        ai_history[user_id].append({"role": "assistant", "content": reply_text})
                         
-                        if reply_text:
-                            ai_history[user_id].append({"role": "assistant", "content": reply_text})
-                            if len(ai_history[user_id]) > 10:
-                                ai_history[user_id] = ai_history[user_id][-6:]
-                            return reply_text
-
-        return "⚠️ Не удалось разобрать ответ от нейросети. Попробуй переотправить вопрос!"
+                        # Контролируем длину истории диалога
+                        if len(ai_history[user_id]) > 10:
+                            ai_history[user_id] = [ai_history[user_id][0]] + ai_history[user_id][-6:]
+                        return reply_text
+                        
+        return "⚠️ Нейросеть взяла паузу. Пожалуйста, отправь сообщение еще раз!"
         
     except Exception as e:
-        logger.error(f"Ошибка ИИ DuckDuckGo: {e}")
+        logger.error(f"Ошибка ИИ Pollinations: {e}")
         if user_id in ai_history and len(ai_history[user_id]) > 1:
             ai_history[user_id].pop()
-        return "⚠️ Сервер ИИ временно не отвечает. Повтори попытку."
+        return "⚠️ Ошибка подключения к ИИ. Попробуй повторить запрос."
 
 # --- КОМАНДЫ И CALLBACK ДЛЯ ИИ ---
 @dp.message(Command("grok"))
