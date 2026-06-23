@@ -40,7 +40,6 @@ class BotStates(StatesGroup):
 
 OPENROUTER_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions"
 
-# ОБНОВЛЕННЫЙ СПИСОК (Добавлена модель openrouter/auto)
 MODELS_DATABASE = {
     "openrouter/auto": "🤖 Автовыбор OpenRouter",
     "openrouter/owl-alpha": "🦉 Owl Alpha (Agentic)",
@@ -59,7 +58,6 @@ MODELS_DATABASE = {
     "nvidia/nemotron-3-nano-30b-a3b:free": "🔋 Nemotron 3 Nano 30B"
 }
 
-# Модели, умеющие обрабатывать файлы/картинки (Сюда же включен автовыбор)
 VISION_MODELS = [
     "openrouter/auto",
     "google/gemma-4-31b-it:free", 
@@ -68,7 +66,7 @@ VISION_MODELS = [
 ]
 
 # ==============================================================================
-# 2. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ РАБОТЫ С МЕДИА И БАЗОЙ
+# 2. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 # ==============================================================================
 async def download_file_as_base64(file_id: str) -> str:
     try:
@@ -180,7 +178,7 @@ def get_admin_keyboard():
     return types.ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
 # ==============================================================================
-# 4. ДИАЛОГ С АДМИНОМ (РЕЖИМ ПОДДЕРЖКИ)
+# 4. ДИАЛОГ С АДМИНОМ (ИСПРАВЛЕНЫ ФИЛЬТРЫ AIOGRAM)
 # ==============================================================================
 @dp.message(F.text == "✍️ Написать админу")
 async def enter_support_mode(message: types.Message, state: FSMContext):
@@ -188,7 +186,7 @@ async def enter_support_mode(message: types.Message, state: FSMContext):
         await message.answer("Вы администратор, вам не нужно писать самому себе.")
         return
     await state.set_state(BotStates.support_mode)
-    await message.answer("💬 Режим связи с администратором включен. Всё, что вы напишете или отправите ниже, будет передано напрямую.", reply_markup=get_support_keyboard())
+    await message.answer("💬 Режим связи с администратором включен. Всё, что вы напишете ниже, будет передано напрямую.", reply_markup=get_support_keyboard())
 
 @dp.message(BotStates.support_mode, F.text == "❌ Выйти из диалога")
 async def exit_support_mode(message: types.Message, state: FSMContext):
@@ -249,7 +247,7 @@ async def cmd_start(message: types.Message, state: FSMContext):
     await message.answer(welcome, reply_markup=get_main_keyboard(message.from_user.id), parse_mode="Markdown")
 
 @dp.message(Command("dice"))
-@dp.message(F.text == "🎲 Сыграть в кости")
+@dp.message(F.text == "🎲 Игра в кости")
 async def handle_dice(message: types.Message):
     await message.answer("🎲 Мой бросок:")
     bot_msg = await message.answer_dice()
@@ -341,7 +339,7 @@ async def broadcast_exec(message: types.Message, state: FSMContext):
     await message.answer(f"📢 Выполнено!\nУспешно: `{s}`\nОшибок: `{f}`", reply_markup=get_admin_keyboard(), parse_mode="Markdown")
 
 # ==============================================================================
-# 6. ОБРАБОТЧИК ИИ С ИСПРАВЛЕННЫМ ДИНАМИЧЕСКИМ СТРУКТУРИРОВАНИЕМ PAYLOAD
+# 6. ОБРАБОТЧИК ИИ (УЛУЧШЕННЫЙ И СТАБИЛЬНЫЙ)
 # ==============================================================================
 @dp.message(Command("ai"))
 @dp.message(F.text == "🤖 Общение с ИИ")
@@ -418,11 +416,10 @@ async def ai_multimedia_handler(message: types.Message, state: FSMContext):
         await status_msg.edit_text("🎙 *Слушаю голосовое сообщение...* 💬", parse_mode="Markdown")
         prompt_text = f"[Голосовое сообщение]: Ответь пользователю на его аудио-запрос."
 
-    # ИСПРАВЛЕНИЕ: Если медиафайлов нет, контент передается СТРОКОЙ. Так любая текстовая модель воспримет запрос корректно.
+    # Чистый текстовый payload, который понимают абсолютно ВСЕ модели OpenRouter без исключения
     if not base64_image:
         final_content = prompt_text
     else:
-        # Если есть фото/видео — переключаем формат на мультимодальный список объектов
         final_content = [
             {"type": "text", "text": prompt_text},
             {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
