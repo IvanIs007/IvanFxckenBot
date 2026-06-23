@@ -93,23 +93,53 @@ async def start_cmd(message: Message):
             parse_mode="HTML",
             reply_markup=get_user_kb()
         )
+import urllib.request
+import urllib.parse
+import json
 
-# --- БЕСПЛАТНЫЙ ИИ ЧЕРЕЗ АГРЕГАТОР POLLINATIONS (БЕЗ КЛЮЧЕЙ) ---
+# --- ОБНОВЛЕННЫЙ БЕСПЛАТНЫЙ ИИ ЧЕРЕЗ POST-ЗАПРОС (СТАБИЛЬНЫЙ) ---
 async def ask_free_ai(prompt: str) -> str:
     try:
         def _fetch():
-            encoded_prompt = urllib.parse.quote(prompt)
-            # Промпт-инструкция для модели
-            system_prompt = urllib.parse.quote("Ты — крутой ИИ-ассистент в боте IvanFuckenBot. Отвечай кратко, современно, используй сленг и пиши строго по делу.")
-            url = f"https://text.pollinations.ai/{encoded_prompt}?system={system_prompt}"
+            url = "https://text.pollinations.ai/"
+            
+            # Формируем правильное JSON-тело запроса со всей историей/инструкцией
+            payload = {
+                "messages": [
+                    {"role": "system", "content": "Ты — крутой ИИ-ассистент в боте IvanFuckenBot. Отвечай кратко, современно, используй сленг и пиши строго по делу."},
+                    {"role": "user", "content": prompt}
+                ],
+                "private": True
+            }
+            
+            # Кодируем данные в байты
+            data = json.dumps(payload).encode('utf-8')
             
             req = urllib.request.Request(
-                url, 
-                headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+                url,
+                data=data,
+                headers={
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+                    'Content-Type': 'application/json'
+                },
+                method='POST'
             )
+            
             with urllib.request.urlopen(req, timeout=15) as response:
                 return response.read().decode('utf-8')
 
+        # Запускаем в отдельном потоке
+        reply = await asyncio.to_thread(_fetch)
+        if reply.strip():
+            return reply
+        return "⚠️ Не удалось получить ответ от ИИ. Попробуй еще раз!"
+        
+    except Exception as e:
+        logger.error(f"Ошибка бесплатного ИИ: {e}")
+        return "⚠️ Не удалось подключиться к серверам нейросети. Попробуй через минутку!"
+
+
+        
         # Выполняем синхронный urllib запрос в отдельном потоке, чтобы бот не фризился
         reply = await asyncio.to_thread(_fetch)
         if reply.strip():
