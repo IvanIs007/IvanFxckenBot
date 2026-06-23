@@ -6,7 +6,10 @@ from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiohttp import web, ClientSession
+from aiohttp import web
+# Импортируем новый официальный клиент Google
+from google import genai
+from google.genai import errors
 
 # ==============================================================================
 # 1. НАСТРОЙКА ПЕРЕМЕННЫХ ОКРУЖЕНИЯ
@@ -24,6 +27,9 @@ bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
+# Инициализируем официальный клиент Google напрямую через ключ
+ai_client = genai.Client(api_key=GEMINI_KEY)
+
 USERS_FILE = "users.txt"
 
 class BotStates(StatesGroup):
@@ -31,9 +37,6 @@ class BotStates(StatesGroup):
     admin_broadcast = State() 
     admin_private_id = State() 
     admin_private_msg = State() 
-
-# Используем универсальный сторонний прокси-интерфейс, который пропускает любые ключи
-GEMINI_PROXY_URL = "https://api.gemini-proxy.ru/v1/chat/completions"
 
 # ==============================================================================
 # 2. РАБОТА С БАЗОЙ ДАННЫХ
@@ -154,44 +157,48 @@ async def admin_broadcast_exec(message: types.Message, state: FSMContext):
     await message.answer(f"✅ Рассылка завершена! Успешно доставлено: [{success}/{len(users)}]", reply_markup=get_admin_keyboard())
 
 # ==============================================================================
-# 6. СТАБИЛЬНЫЙ ХЕНДЛЕР НЕЙРОСЕТИ (ЧЕРЕЗ УНИВЕРСАЛЬНЫЙ ПРОКСИ)
+# 6. ОФИЦИАЛЬНЫЙ КЛИЕНТ GOOGLE GEMINI (БЕЗ ПОСРЕДНИКОВ И ПРОКСИ)
 # ==============================================================================
 @dp.message(BotStates.ai_mode)
 async def handle_ai_request(message: types.Message):
     if not message.text or message.text == "❌ Выйти из режима ИИ": return 
     
     await bot.send_chat_action(chat_id=message.chat.id, action="typing")
-    
-    # Формат OpenAI Completions, который гарантированно обрабатывает прокси
-    payload = {
-        "model": "gemini-2.5-flash",
-        "messages": [{"role": "user", "content": message.text}]
-    }
-    
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {GEMINI_KEY}"
-    }
 
     try:
-        async with ClientSession() as session:
-            async with session.post(GEMINI_PROXY_URL, json=payload, headers=headers, timeout=30) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    ai_text = data['choices'][0]['message']['content']
-                    await message.answer(ai_text)
-                elif response.status in [401, 403]:
-                    await message.answer("⚠️ Ошибка авторизации. Проверь GEMINI_API_KEY в панели Render.")
-                else:
-                    await message.answer(f"⚠️ Ошибка сети. Код ответа сервера: {response.status}")
+        # Запускаем генерацию в отдельном потоке, так как метод синхронный в genai.Client
+        loop = asyncio.get_running_loop()
+        response = await loop.run_in_executor(
+            None, 
+            lambda: ai_client.models.generate_content(
+                model='gemini-2.5-flash',
+                contents=message.text,
+            )
+        )
+        
+        if response and response.text:
+            await message.answer(response.text)
+        else:
+            await message.answer("⚠️ Пустой ответ от нейросети. Попробуйте перефразировать вопрос.")
+            
+    except errors.APIError as e:
+        # Перехватываем официальные ошибки самого Google API
+        print(f"Google API Error: {e}", file=sys.stderr)
+        if "429" in str(e):
+            await message.answer("⚠️ Превышен лимит запросов к ИИ. Подождите пару минут.")
+        elif "403" in str(e) or "401" in str(e):
+            await message.answer("⚠️ Ошибка авторизации. Проверьте правильность GEMINI_API_KEY в Render.")
+        else:
+            await message.answer(f"⚠️ Ошибка Google API: {e.message}")
     except Exception as e:
-        await message.answer("⚠️ Не удалось получить ответ. Попробуйте еще раз.")
+        print(f"Общая ошибка: {e}", file=sys.stderr)
+        await message.answer("⚠️ Не удалось получить ответ. Попробуйте отправить сообщение еще раз.")
 
 # ==============================================================================
 # 7. ВЕБ-СЕРВЕР ДЛЯ ПОДДЕРЖАНИЯ СТАБИЛЬНОСТИ НА RENDER
 # ==============================================================================
 async def handle_render_ping(request):
-    return web.Response(text="Бот активен!", status=200)
+    return web.Response(text="Бот стабилен и работает на официальной SDK Google GenAI!", status=200)
 
 async def main():
     app = web.Application()
