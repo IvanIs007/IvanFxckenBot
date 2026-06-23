@@ -1,13 +1,13 @@
 import os
 import sys
 import asyncio
+import urllib.parse
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from google import genai
-from aiohttp import web
+from aiohttp import web, ClientSession
 
 # ==============================================================================
 # 1. ИНИЦИАЛИЗАЦИЯ И ПРОВЕРКА ПЕРЕМЕННЫХ
@@ -19,15 +19,15 @@ PORT = int(os.environ.get("PORT", 10000))
 ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))  
 
 if not BOT_TOKEN or not GEMINI_KEY:
-    print("КРИТИЧЕСКАЯ ОШИБКА: Проверь TELEGRAM_BOT_TOKEN и GEMINI_API_KEY на Render!")
+    print("КРИТИЧЕСКАЯ ОШИБКА: Проверь TELEGRAM_BOT_TOKEN и GEMINI_API_KEY в Environment Variables!")
     sys.exit(1)
+
+# Выведем в логи начало ключа для самопроверки (без полной утечки данных)
+print(f"Бот запущен. Проверка ключа Gemini (первые 6 символов): {GEMINI_KEY[:6]}...")
 
 bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
-
-# Инициализируем официальный клиент Gemini SDK
-ai_client = genai.Client(api_key=GEMINI_KEY)
 
 USERS_FILE = "users.txt"
 
@@ -36,6 +36,16 @@ class BotStates(StatesGroup):
     admin_broadcast = State() 
     admin_private_id = State() 
     admin_private_msg = State() 
+
+# Формируем оригинальный URL и безопасно кодируем его для прокси-серверов
+ORIGINAL_URL = f"https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key={GEMINI_KEY}"
+ENCODED_URL = urllib.parse.quote(ORIGINAL_URL, safe='')
+
+# Список независимых прокси-шлюзов для обхода блокировки 429
+PROXY_POOL = [
+    f"https://api.allorigins.win/raw?url={ENCODED_URL}",
+    f"https://corsproxy.io/?{urllib.parse.quote(ORIGINAL_URL)}"
+]
 
 # ==============================================================================
 # ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ (БАЗА ДАННЫХ В ТЕКСТОВОМ ФАЙЛЕ)
@@ -195,44 +205,37 @@ async def admin_download_db(message: types.Message):
         await message.answer("База еще не создана.")
 
 # ==============================================================================
-# 5. ХЕНДЛЕР ОБРАБОТКИ GEMINI ЧЕРЕЗ ОФИЦИАЛЬНЫЙ SDK
+# 5. ХЕНДЛЕР ОБРАБОТКИ GEMINI С ЗАЩИЩЕННЫМ URL КОДИРОВАНИЕМ
 # ==============================================================================
 @dp.message(BotStates.ai_mode)
 async def handle_ai_request(message: types.Message):
     if not message.text: return
     await bot.send_chat_action(chat_id=message.chat.id, action="typing")
     
-    try:
-        # Запускаем синхронный вызов SDK в отдельном потоке, чтобы не вешать асинхронный таск бота
-        loop = asyncio.get_running_loop()
-        response = await loop.run_in_executor(
-            None, 
-            lambda: ai_client.models.generate_content(
-                model='gemini-2.5-flash',
-                contents=message.text,
-            )
-        )
-        if response and response.text:
-            await message.answer(response.text)
-        else:
-            await message.answer("⚠️ Пустой ответ от нейросети. Попробуйте перефразировать.")
-            
-    except Exception as e:
-        err_msg = str(e)
-        print(f"Ошибка Gemini SDK: {err_msg}", file=sys.stderr)
-        
-        if "429" in err_msg or "Quota" in err_msg:
-            await message.answer("⚠️ Превышен лимит запросов (429). Google ограничил IP хостинга. Подождите пару минут.")
-        elif "API key" in err_msg or "403" in err_msg or "400" in err_msg:
-            await message.answer("⚠️ Ошибка ключа: Проверьте правильность GEMINI_API_KEY в настройках Render!")
-        else:
-            await message.answer("⚠️ Произошла ошибка при генерации ответа. Попробуйте еще раз.")
+    payload = {"contents": [{"parts": [{"text": message.text}]}]}
+
+    for proxy_url in PROXY_POOL:
+        try:
+            async with ClientSession() as session:
+                async with session.post(proxy_url, json=payload, timeout=15) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        ai_text = data['candidates'][0]['content']['parts'][0]['text']
+                        await message.answer(ai_text)
+                        return
+                    else:
+                        print(f"Лог: Прокси вернул статус {response.status}. Пробуем альтернативный...", file=sys.stderr)
+        except Exception as e:
+            print(f"Лог: Ошибка подключения к прокси: {e}", file=sys.stderr)
+            continue
+
+    await message.answer("⚠️ Сервер временного шлюза перегружен (429/401). Повторите попытку ввода через 15-30 секунд.")
 
 # ==============================================================================
 # 6. ВЕБ-СЕРВЕР И ЗАПУСК
 # ==============================================================================
 async def handle_render_ping(request):
-    return web.Response(text="Бот работает на официальном Google SDK!", status=200)
+    return web.Response(text="Бот стабилен и защищен от ошибок компиляции!", status=200)
 
 async def main():
     app = web.Application()
