@@ -384,6 +384,3 @@ def run_server():
 if __name__ == "__main__":
     threading.Thread(target=run_server, daemon=True).start()
     asyncio.run(dp.start_polling(bot))
-
-
-Вот этот код перепиши чтобы нейросеть работала. Например на Gemini 2.5 flash
