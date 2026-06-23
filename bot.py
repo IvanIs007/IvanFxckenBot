@@ -136,9 +136,9 @@ async def handle_ai_request(message: types.Message):
     
     await bot.send_chat_action(chat_id=message.chat.id, action="typing")
     
-    # Формируем стандартный Payload для OpenAI-совместимых API
+  # Формируем стандартный Payload для OpenAI-совместимых API
     payload = {
-        "model": "google/gemini-2.5-flash", # Используем бесплатную/дешевую Gemini через OpenRouter. Можно заменить, например, на 'meta-llama/llama-3-8b-instruct:free'
+        "model": "google/gemini-2.5-flash:free",  # Включили БЕСПЛАТНУЮ версию Gemini Flash
         "messages": [
             {"role": "user", "content": message.text}
         ]
