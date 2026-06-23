@@ -11,15 +11,17 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiohttp import web, ClientSession
 
 # ==============================================================================
-# 1. НАСТРОЙКА ПЕРЕМЕННЫХ ОКРУЖЕНИЯ
+# 1. НАСТРОЙКА ПЕРЕМЕННЫХ ОКРУЖЕНИЯ И АДМИНИСТРАТОРА
 # ==============================================================================
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 OPENROUTER_KEY = os.environ.get("OPENROUTER_API_KEY")  
 PORT = int(os.environ.get("PORT", 10000))
-ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))  
+
+# Жестко прописываем твой ID в код, чтобы исключить сбои с Environment в Render
+ADMIN_ID = 509023958  
 
 if not BOT_TOKEN or not OPENROUTER_KEY:
-    print("КРИТИЧЕСКАЯ ОШИБКА: Проверь токен в Render!")
+    print("КРИТИЧЕСКАЯ ОШИБКА: Проверь токены в Render!")
     sys.exit(1)
 
 bot = Bot(token=BOT_TOKEN)
@@ -28,7 +30,6 @@ dp = Dispatcher(storage=storage)
 
 USERS_FILE = "users.txt"
 
-# Состояния FSM
 class BotStates(StatesGroup):
     ai_mode = State()         
     admin_broadcast = State() 
@@ -37,14 +38,12 @@ class BotStates(StatesGroup):
 
 OPENROUTER_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions"
 
-# АКТУАЛЬНАЯ НА СЕГОДНЯ БАЗА РАБОЧИХ БЕСПЛАТНЫХ МОДЕЛЕЙ OPENROUTER
+# АКТУАЛИЗИРОВАННЫЙ СПИСОК ЖЕЛЕЗОБЕТОННЫХ БЕСПЛАТНЫХ МОДЕЙ OPENROUTER
 MODELS_DATABASE = {
-    "openrouter/free": "🤖 Автовыбор ИИ (Лучшая свободная)",
-    "meta-llama/llama-3.3-70b-instruct:free": "🦙 Llama 3.3 70B (Free)",
-    "deepseek/deepseek-r1:free": "🧐 DeepSeek R1 (Рассуждения)",
-    "qwen/qwen-2.5-72b-instruct:free": "🐉 Qwen 2.5 72B (Free)",
-    "google/gemini-2.5-flash:free": "⚡ Gemini 2.5 Flash (Free)",
-    "google/gemma-2-9b-it:free": "🧠 Gemma 2 9B (Free)"
+    "openrouter/free": "🤖 Автовыбор ИИ (Самая быстрая свободная)",
+    "meta-llama/llama-3-8b-instruct:free": "🦙 Llama 3 8B (Free)",
+    "qwen/qwen-2-7b-instruct:free": "🐉 Qwen 2 7B (Free)",
+    "microsoft/phi-3-mini-128k-instruct:free": "🧩 Phi-3 Mini (Free)"
 }
 
 # ==============================================================================
@@ -90,29 +89,13 @@ def get_admin_keyboard():
     ]
     return types.ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
-def get_models_inline_keyboard(page: int = 0):
+def get_models_inline_keyboard():
     builder = InlineKeyboardBuilder()
-    items = list(MODELS_DATABASE.items())
-    per_page = 4
-    start = page * per_page
-    end = start + per_page
-    
-    for model_id, name in items[start:end]:
-        # Обрезаем callback_data до безопасной длины
+    for model_id, name in MODELS_DATABASE.items():
+        # Превращаем ID в короткий уникальный callback-ключ
         short_id = model_id.split("/")[-1].split(":")[0][:15]
         builder.button(text=name, callback_data=f"set_{short_id}")
-    
     builder.adjust(1)
-    
-    nav_buttons = []
-    if page > 0:
-        nav_buttons.append(types.InlineKeyboardButton(text="⬅️ Назад", callback_data=f"page_{page-1}"))
-    if end < len(items):
-        nav_buttons.append(types.InlineKeyboardButton(text="Вперед ➡️", callback_data=f"page_{page+1}"))
-    
-    if nav_buttons:
-        builder.row(*nav_buttons)
-        
     return builder.as_markup()
 
 # ==============================================================================
@@ -122,8 +105,7 @@ def get_models_inline_keyboard(page: int = 0):
 async def cmd_start(message: types.Message):
     save_user(message.from_user.id)  
     await message.answer(
-        "✌️ Здорова! Я обновленный бот.\n"
-        "Выбирай действия на кнопках ниже!",
+        "✌️ Здорова! Я обновленный бот.\nВыбирай действия на кнопках ниже!",
         reply_markup=get_main_keyboard()
     )
 
@@ -136,27 +118,19 @@ async def start_ai_mode(message: types.Message, state: FSMContext):
     model_name = MODELS_DATABASE.get(current_model, "Автовыбор")
     
     await message.answer(
-        f"🤖 **Режим ИИ активирован!**\n"
-        f"Текущая модель: `{model_name}`\n\n"
-        f"Задай свой вопрос или нажми кнопку настройки кубика:",
+        f"🤖 **Режим ИИ активирован!**\nТекущая модель: `{model_name}`\n\nЗадай свой вопрос:",
         reply_markup=get_ai_keyboard(), parse_mode="Markdown"
     )
 
 @dp.message(BotStates.ai_mode, F.text == "⚙️ Выбрать нейросеть")
 async def show_models_menu(message: types.Message):
-    await message.answer("Выберите бесплатную нейросеть из актуальной базы:", reply_markup=get_models_inline_keyboard(0))
-
-@dp.callback_query(F.data.startswith("page_"))
-async def process_model_page(callback: types.CallbackQuery):
-    page = int(callback.data.split("_")[1])
-    await callback.message.edit_reply_markup(reply_markup=get_models_inline_keyboard(page))
-    await callback.answer()
+    await message.answer("Выберите бесплатную модель из списка стабильных:", reply_markup=get_models_inline_keyboard())
 
 @dp.callback_query(F.data.startswith("set_"))
 async def process_set_model(callback: types.CallbackQuery, state: FSMContext):
     short_id = callback.data.split("_")[1]
-    
     full_model_id = "openrouter/free"
+    
     for m_id in MODELS_DATABASE.keys():
         if short_id in m_id:
             full_model_id = m_id
@@ -177,17 +151,14 @@ async def exit_ai_mode(message: types.Message, state: FSMContext):
 async def handle_tracks(message: types.Message):
     await message.answer("🎵 Тут когда-нибудь будут треки...")
 
-# --- ИНТЕРЕСТНАЯ ИГРА В КОСТИ ---
 @dp.message(F.text == "🎲 Сыграть в кости")
 async def handle_dice(message: types.Message):
     await message.answer("🎲 Играем! Сначала кидаю я, потом ты...")
     
-    # Бросок бота
     bot_msg = await message.answer_dice()
     bot_score = bot_msg.dice.value
-    await asyncio.sleep(4) # Ждем пока анимация кубика завершится
+    await asyncio.sleep(4) 
     
-    # Бросок игрока
     user_msg = await message.answer_dice()
     user_score = user_msg.dice.value
     await asyncio.sleep(4)
@@ -195,31 +166,27 @@ async def handle_dice(message: types.Message):
     result_text = f"🤖 Мой результат: **{bot_score}**\n👤 Твой результат: **{user_score}**\n\n"
     
     if bot_score > user_score:
-        win_phrases = [
-            "Ха! Я победил! Слава роботам, мешок с костями! 🤖🦾",
-            "Изи вин для искусственного интеллекта! Попробуй еще раз 🧠",
-            "Увы и ах, удача сегодня на моей стороне! 😉"
-        ]
-        result_text += random.choice(win_phrases)
+        result_text += random.choice([
+            "Ха! Я победил! Слава роботам! 🤖🦾",
+            "Изи вин для искусственного интеллекта! 😎",
+            "Удача сегодня на моей стороне! 😉"
+        ])
     elif user_score > bot_score:
-        lose_phrases = [
+        result_text += random.choice([
             "Ого! Ты выиграл! Признавайся, подкрутил кубики? 🧐🎉",
-            "Поздравляю, твоя удача сильнее моих алгоритмов! 🏆",
-            "Ты победил! Чистая победа человека над машиной ✊"
-        ]
-        result_text += random.choice(lose_phrases)
+            "Поздравляю, твоя удача сильнее алгоритмов! 🏆",
+            "Ты победил! Чистая победа человека! ✊"
+        ])
     else:
-        draw_phrases = [
+        result_text += random.choice([
             "Ничья! Мы достойные соперники друг друга 🤝",
-            "На кубиках одинаково! Давай перекинем? 🔄",
-            "Мир дружба жвачка! Абсолютный баланс 🌓"
-        ]
-        result_text += random.choice(draw_phrases)
+            "На кубиках одинаково! Давай перекинем? 🔄"
+        ])
         
     await message.answer(result_text, parse_mode="Markdown")
 
 # ==============================================================================
-# 5. ИСПРАВЛЕННАЯ ПАНЕЛЬ АДМИНИСТРАТОРА
+# 5. ГАРАНТИРОВАННО РАБОЧАЯ ПАНЕЛЬ АДМИНИСТРАТОРА
 # ==============================================================================
 @dp.message(Command("admin"))
 async def cmd_admin(message: types.Message):
@@ -362,7 +329,7 @@ async def main():
     await runner.setup()
     await web.TCPSite(runner, host='0.0.0.0', port=PORT).start()
 
-    print("Запуск...")
+    print("Запуск бота...")
     try:
         await dp.start_polling(bot)
     finally:
