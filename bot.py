@@ -1,4 +1,5 @@
-Import asyncio
+import aiogram
+import asyncio
 import logging
 import os
 import threading
