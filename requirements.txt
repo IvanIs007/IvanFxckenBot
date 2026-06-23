@@ -1,3 +1,2 @@
 aiogram==3.13.1
-aiohttp
-nest_asyncio
+google-genai==0.1.1
