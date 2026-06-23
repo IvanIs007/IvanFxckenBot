@@ -3,6 +3,8 @@ import logging
 import os
 import threading
 import json
+import urllib.request
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import httpcore
 from aiogram import Bot, Dispatcher, F
@@ -94,30 +96,34 @@ async def start_cmd(message: Message):
             reply_markup=get_user_kb()
         )
 
-# --- ПОЛНОСТЬЮ БЕСПЛАТНЫЙ ИИ БЕЗ КЛЮЧЕЙ (Прямой коннект) ---
+
+# --- ПОЛНОСТЬЮ БЕСПЛАТНЫЙ ИИ БЕЗ КЛЮЧЕЙ (Стабильный шлюз) ---
 async def ask_free_ai(prompt: str) -> str:
     try:
-        # Используем публичный шлюз для работы с Llama 3
-        payload = {
-            "model": "meta-llama/Meta-Llama-3-8B-Instruct",
-            "messages": [
-                {"role": "system", "content": "Ты — крутой ИИ-ассистент в боте IvanFuckenBot. Отвечай кратко, современно и по делу."},
-                {"role": "user", "content": prompt}
-            ],
-            "max_tokens": 512
-        }
-        
-        async with httpcore.AsyncClient() as client:
-            response = await client.request(
-                b"POST",
-                b"https://open-api.colaboratory.org/v1/chat/completions", # Бесплатное зеркало
-                headers=[(b"Content-Type", b"application/json")],
-                content=json.dumps(payload).encode('utf-8')
+        # Запасной супер-стабильный шлюз через встроенный urllib
+        def _fetch():
+            encoded_prompt = urllib.parse.quote(prompt)
+            # Задаем системную инструкцию прямо в URL для простоты
+            system_prompt = urllib.parse.quote("Ты — крутой ИИ-ассистент в боте IvanFuckenBot. Отвечай кратко, современно и по делу.")
+            url = f"https://text.pollinations.ai/{encoded_prompt}?system={system_prompt}"
+            
+            req = urllib.request.Request(
+                url, 
+                headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
             )
-            res_data = json.loads(response.content.decode('utf-8'))
-            return res_data['choices'][0]['message']['content']
+            with urllib.request.urlopen(req, timeout=15) as response:
+                return response.read().decode('utf-8')
+
+        # Запускаем в потоке, чтобы бот не зависал во время ответа
+        reply = await asyncio.to_thread(_fetch)
+        if reply.strip():
+            return reply
+        return "⚠️ Не удалось получить вменяемый ответ. Попробуй еще раз!"
+        
     except Exception as e:
         logger.error(f"AI Error: {e}")
+        return "⚠️ Не удалось подключиться к серверам ИИ. Попробуй через минутку!"
+
         # Запасной ультра-быстрый вариант, если первый шлюз перегружен
         try:
             async with httpcore.AsyncClient() as client:
