@@ -21,7 +21,7 @@ HF_KEY = os.environ.get("HF_API_KEY", "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")
 PORT = int(os.environ.get("PORT", 10000))
 
 if not BOT_TOKEN or not OPENROUTER_KEY:
-    print("КРИТИЧЕСКАЯ ОШИБКА: Проверь TELEGRAM_BOT_TOKEN и OPENROUTER_API_KEY в переменных среды!")
+    print("КРИТИЧЕСКАЯ ОШИБКА: Проверь TELEGRAM_BOT_TOKEN и OPENROUTER_API_KEY в переменной среды!")
     sys.exit(1)
 
 bot = Bot(token=BOT_TOKEN)
@@ -494,7 +494,7 @@ async def save_ai_selection(callback: types.CallbackQuery, state: FSMContext):
     await callback.answer()
 
 # ==============================================================================
-# 7. ОСНОВНОЙ ОБРАБОТЧИК ИИ С ВАЛИДАЦИЕЙ МУЛЬТИМЕДИА
+# 7. ОСНОВНОЙ ОБРАБОТЧИК ИИ С ВАЛИДАЦИЕЙ МУЛЬТИМЕДИА И ХАРДКОДОМ DNS HF
 # ==============================================================================
 @dp.message(Command("ai"))
 @dp.message(F.text == "🤖 Общение с ИИ")
@@ -536,11 +536,12 @@ async def ai_multimedia_handler(message: types.Message, state: FSMContext):
 
     prompt_text = message.text or message.caption or "Опиши и проанализируй этот файл."
 
-    # Прямой обход DNS кеша во всех сессиях Docker
-    connector = TCPConnector(use_dns_cache=False)
+    # КРИТИЧЕСКИЙ ФИКС: Отключаем встроенный DNS-кеш aiohttp и проверку соответствия домена в SSL, 
+    # так как мы будем обращаться напрямую по IP-адресу Cloudflare/HuggingFace Edge.
+    connector = TCPConnector(use_dns_cache=False, ssl=False)
 
     # --------------------------------------------------------------------------
-    # СХЕМА РАБОТЫ FLUX.2-dev (ГЕНЕРАЦИЯ КАРТИНОК)
+    # СХЕМА РАБОТЫ FLUX.2-dev (ГЕНЕРАЦИЯ КАРТИНОК ПО ХАРДКОД-IP)
     # --------------------------------------------------------------------------
     if chosen_model == "hf/black-forest-labs/FLUX.2-dev":
         if has_photo_video or has_voice:
@@ -550,8 +551,13 @@ async def ai_multimedia_handler(message: types.Message, state: FSMContext):
         await bot.send_chat_action(chat_id=message.chat.id, action="upload_photo")
         status_msg = await message.answer("🎨 *Иван Факен запускает генератор картинок...* ⏳", parse_mode="Markdown")
         
-        hf_img_url = "https://api-inference.huggingface.co/models/black-forest-labs/FLUX.2-dev"
-        headers = {"Authorization": f"Bearer {HF_KEY}", "Content-Type": "application/json"}
+        # Вместо текстового домена шлем напрямую на IP
+        hf_img_url = "https://172.67.185.127/models/black-forest-labs/FLUX.2-dev"
+        headers = {
+            "Authorization": f"Bearer {HF_KEY}", 
+            "Content-Type": "application/json",
+            "Host": "api-inference.huggingface.co"  # Заголовок Host обязателен для Cloudflare!
+        }
         payload = {"inputs": prompt_text}
         
         try:
@@ -567,14 +573,14 @@ async def ai_multimedia_handler(message: types.Message, state: FSMContext):
                         )
                         return
                     else:
-                        await status_msg.edit_text(f"⚠️ Ошибка генерации на HF (Код {resp.status}). Модель просыпается, повторите запрос через минуту.")
+                        await status_msg.edit_text(f"⚠️ Ошибка генерации на HF (Код {resp.status}). Возможно, модель спит и сейчас прогревается.")
                         return
         except Exception as e:
             await status_msg.edit_text(f"⚠️ Ошибка при обращении к FLUX: {e}")
             return
 
     # --------------------------------------------------------------------------
-    # СХЕМА ТЕКСТОВОГО СТРИМИНГА (OPENROUTER / HUGGING FACE ЧАТ)
+    # СХЕМА ТЕКСТОВОГО СТРИМИНГА С ПРЯМЫМ ОБХОДОМ DNS ДЛЯ HF
     # --------------------------------------------------------------------------
     await bot.send_chat_action(chat_id=message.chat.id, action="typing")
     status_msg = await message.answer("⚡ *Считываю входящие данные...* 🔍", parse_mode="Markdown")
@@ -607,18 +613,21 @@ async def ai_multimedia_handler(message: types.Message, state: FSMContext):
             {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
         ]
 
+    # Инициализируем базовые заголовки
+    headers = {"Authorization": f"Bearer {OPENROUTER_KEY}", "Content-Type": "application/json"}
+
     # Разруливаем эндпоинты в зависимости от префиксов
     if chosen_model.startswith("hf/"):
         actual_model = chosen_model.replace("hf/", "")
         if "GLM-5.2" in actual_model:
             actual_model = "zai-org/GLM-5.2"
         
-        # Подставляем URL конкретной модели для обхода проблем с глобальным роутингом HF
-        current_endpoint = f"https://api-inference.huggingface.co/models/{actual_model}/v1/chat/completions"
-        current_key = HF_KEY
+        # Жёсткий обход DNS: коннектимся прямо на проверенный IP-адрес Cloudflare Edge (Hugging Face)
+        current_endpoint = f"https://172.67.185.127/models/{actual_model}/v1/chat/completions"
+        headers["Authorization"] = f"Bearer {HF_KEY}"
+        headers["Host"] = "api-inference.huggingface.co"  # Обязательно передаем оригинальный хост
     else:
         current_endpoint = OPENROUTER_ENDPOINT
-        current_key = OPENROUTER_KEY
         actual_model = chosen_model
 
     payload = {
@@ -626,7 +635,6 @@ async def ai_multimedia_handler(message: types.Message, state: FSMContext):
         "messages": [{"role": "user", "content": final_content}],
         "stream": True  
     }
-    headers = {"Authorization": f"Bearer {current_key}", "Content-Type": "application/json"}
     
     full_response = ""
     last_text = ""
@@ -638,7 +646,7 @@ async def ai_multimedia_handler(message: types.Message, state: FSMContext):
         async with ClientSession(timeout=ClientTimeout(total=None), connector=connector) as session:
             async with session.post(current_endpoint, json=payload, headers=headers) as response:
                 if response.status != 200:
-                    await status_msg.edit_text(f"⚠️ Ошибка сети/API (Код {response.status}). Модель на Hugging Face возможно выгружена из памяти и сейчас прогревается.")
+                    await status_msg.edit_text(f"⚠️ Ошибка API (Код {response.status}). Возможно, модель выгружена из памяти и сейчас просыпается на серверах Hugging Face.")
                     return
 
                 async for line in response.content:
