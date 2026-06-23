@@ -1,22 +1,34 @@
 import aiogram
-import asyncio
-import logging
 import os
-import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
-from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, BotCommand, BotCommandScopeChat, BotCommandScopeDefault
+import sys
+import asyncio
+from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-import aiohttp
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+from aiohttp import web
+from google import genai
 
-# --- НАСТРОЙКИ ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ---
-BOT_TOKEN = os.environ["BOT_TOKEN"]
-ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
-PORT = int(os.environ.get("PORT", 10000))
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
+PORT = int(os.environ.get("PORT", 10000)) # Render автоматически передает этот порт
+
+if not BOT_TOKEN or not GEMINI_KEY:
+    print("КРИТИЧЕСКАЯ ОШИБКА: Не заданы переменные TELEGRAM_BOT_TOKEN или GEMINI_API_KEY в настройках Render!")
+    sys.exit(1)
+
+# Инициализируем клиента Gemini (новый SDK автоматически подхватит GEMINI_API_KEY из окружения)
+client = genai.Client()
+
+bot = Bot(token=BOT_TOKEN)
+storage = MemoryStorage()
+dp = Dispatcher(storage=storage)
+
+# Ограничиваем состояния пользователя для режима ИИ
+class BotStates(StatesGroup):
+    ai_mode = State()
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
