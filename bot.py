@@ -114,7 +114,7 @@ async def ask_grok(prompt: str) -> str:
         return "❌ Ошибка: Grok API не настроен на сервере (отсутствует XAI_API_KEY)."
     try:
         response = await grok_client.chat.completions.create(
-            model="grok-2-latest", # Или grok-beta / grok-2-mini в зависимости от доступности
+            model="grok-2-mini", # Поменяли нерабочую grok-2-latest на точную grok-2-mini
             messages=[
                 {"role": "system", "content": "Ты — крутой и полезный ИИ-ассистент в боте IvanFuckenBot. Отвечай кратко, емко и по делу."},
                 {"role": "user", "content": prompt}
@@ -124,6 +124,7 @@ async def ask_grok(prompt: str) -> str:
     except Exception as e:
         logger.error(f"Ошибка Grok API: {e}")
         return f"⚠️ Произошла ошибка при запросе к нейросети. Попробуй позже."
+
 
 # --- КОМАНДЫ И CALLBACK ДЛЯ РЕЖИМА ИИ ---
 @dp.message(Command("grok"))
