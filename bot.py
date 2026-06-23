@@ -97,41 +97,25 @@ async def start_cmd(message: Message):
             reply_markup=get_user_kb()
         )
 
-# --- ОБНОВЛЕННАЯ ФУНКЦИЯ ДЛЯ GEMINI 1.5 FLASH ---
+     # --- СТАБИЛЬНЫЙ ИИ (gemini-2.0-flash) ---
 async def ask_free_ai(user_id: int, prompt: str) -> str:
-    if not GEMINI_API_KEY:
-        return "⚠️ Администратор не настроил GEMINI_API_KEY!"
-        
+    if not GEMINI_API_KEY: return "⚠️ Ключ не настроен!"
     try:
-        if user_id not in ai_history:
-            ai_history[user_id] = []
-        
-        # Добавляем сообщение пользователя в историю
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
+        if user_id not in ai_history: ai_history[user_id] = []
         ai_history[user_id].append({"role": "user", "parts": [{"text": prompt}]})
         
-        # Ограничиваем историю (последние 10 сообщений), чтобы не упереться в лимиты токенов
-        if len(ai_history[user_id]) > 10:
-            ai_history[user_id] = ai_history[user_id][-10:]
-        
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
-        
-        payload = {
-            "contents": ai_history[user_id],
-            "system_instruction": {
-                "parts": [{"text": "Ты — крутой ИИ-ассистент IvanFuckenBot. Отвечай кратко, используй сленг, пиши на русском."}]
-            },
-            "generationConfig": {
-                "temperature": 0.7,
-                "maxOutputTokens": 800
-            }
-        }
-        
         async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload, timeout=20) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    reply_text = data['candidates'][0]['content']['parts'][0]['text']
-                    
+            async with session.post(url, json={"contents": ai_history[user_id]}, timeout=20) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    text = data['candidates'][0]['content']['parts'][0]['text']
+                    ai_history[user_id].append({"role": "model", "parts": [{"text": text}]})
+                    return text
+                return f"⚠️ Ошибка API ({resp.status})"
+    except Exception as e:
+        logger.error(f"ИИ Ошибка: {e}")
+        return "⚠️ Ошибка связи с нейросетью."               
                     # Добавляем ответ модели в историю
                     ai_history[user_id].append({"role": "model", "parts": [{"text": reply_text}]})
                     return reply_text
