@@ -16,7 +16,7 @@ import aiohttp
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
 PORT = int(os.environ.get("PORT", 10000))
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "") # Сюда прилетит ключ из панели Render
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -30,9 +30,10 @@ tracks_db = []
 recent_chats = {}   
 forward_map = {}    
 ai_mode_users = set() 
-
-# Хранилище контекста диалогов для Gemini
 ai_history = {}  
+
+# Семафор для предотвращения одновременного спама в API
+api_limiter = asyncio.Semaphore(1)
 
 class AdminStates(StatesGroup):
     waiting_for_track_file = State()
@@ -98,77 +99,62 @@ async def start_cmd(message: Message):
             reply_markup=get_user_kb()
         )
 
-     # --- СТАБИЛЬНЫЙ ИИ (gemini-2.0-flash) ---
+# --- РАБОТА С GEMINI API ---
 async def ask_free_ai(user_id: int, prompt: str) -> str:
-    if not GEMINI_API_KEY: return "⚠️ Ключ не настроен!"
-    try:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
-        if user_id not in ai_history: ai_history[user_id] = []
-        ai_history[user_id].append({"role": "user", "parts": [{"text": prompt}]})
-        
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, json={"contents": ai_history[user_id]}, timeout=20) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    text = data['candidates'][0]['content']['parts'][0]['text']
-                    ai_history[user_id].append({"role": "model", "parts": [{"text": text}]})
-                    return text
-                return f"⚠️ Ошибка API ({resp.status})"
-    except Exception as e:
-        logger.error(f"ИИ Ошибка: {e}")
-        return "⚠️ Ошибка связи с нейросетью."      
-
-        
+    if not GEMINI_API_KEY: 
+        return "⚠️ Ключ ИИ не настроен в переменных окружения!"
+    
+    async with api_limiter:
+        try:
+            await asyncio.sleep(1)  # Защита от Rate Limit (429)
+            
+            # Используем стабильную модель gemini-1.5-flash
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+            
+            if user_id not in ai_history: 
+                ai_history[user_id] = []
                 
-        # Системный промпт зашиваем прямо перед отправкой, чтобы модель знала роль
-        system_instruction = "Ты крутой ИИ-ассистент IvanFuckenBot. Отвечай кратко, используй молодежный сленг, пиши только на русском и по делу."
-        
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
-        
-        payload = {
-            "contents": ai_history[user_id],
-            "systemInstruction": {
-                "parts": [{"text": system_instruction}]
-            },
-            "generationConfig": {
-                "temperature": 0.7,
-                "maxOutputTokens": 800
+            ai_history[user_id].append({"role": "user", "parts": [{"text": prompt}]})
+            
+            system_instruction = "Ты крутой ИИ-ассистент IvanFuckenBot. Отвечай кратко, используй молодежный сленг, пиши только на русском и по делу."
+            
+            payload = {
+                "contents": ai_history[user_id],
+                "systemInstruction": {
+                    "parts": [{"text": system_instruction}]
+                },
+                "generationConfig": {
+                    "temperature": 0.7,
+                    "maxOutputTokens": 500
+                }
             }
-        }
-        
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload, timeout=20) as response:
-                if response.status == 200:
-                    result = await response.json()
-                    try:
-                        reply_text = result['candidates'][0]['content']['parts'][0]['text']
-                        reply_text = reply_text.strip()
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, json=payload, timeout=20) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        text = data['candidates'][0]['content']['parts'][0]['text'].strip()
+                        ai_history[user_id].append({"role": "model", "parts": [{"text": text}]})
                         
-                        if reply_text:
-                            # Добавляем ответ модели в историю
-                            ai_history[user_id].append({"role": "model", "parts": [{"text": reply_text}]})
-                            
-                            # Ограничиваем контекст (последние 10 реплик)
-                            if len(ai_history[user_id]) > 10:
-                                ai_history[user_id] = ai_history[user_id][-10:]
-                            return reply_text
-                    except KeyError:
-                        pass
-                else:
-                    error_data = await response.text()
-                    logger.error(f"Gemini API Error: {error_data}")
-
-        return "⚠️ Нейросеть перегружена или думает слишком долго. Повтори вопрос."
-        
-    except Exception as e:
-        logger.error(f"Ошибка Gemini: {e}")
-        if user_id in ai_history and len(ai_history[user_id]) > 0:
-            ai_history[user_id].pop()
-        return "⚠️ Произошла ошибка при обращении к ИИ. Попробуй позже."
+                        # Ограничение контекста до 10 сообщений
+                        if len(ai_history[user_id]) > 10:
+                            ai_history[user_id] = ai_history[user_id][-10:]
+                        return text
+                    elif resp.status == 429:
+                        if ai_history[user_id]: ai_history[user_id].pop()
+                        return "⚠️ Ошибка API (429) — слишком много запросов. Подожди минуту."
+                    else:
+                        if ai_history[user_id]: ai_history[user_id].pop()
+                        return f"⚠️ Ошибка API ({resp.status})"
+        except Exception as e:
+            logger.error(f"ИИ Ошибка: {e}")
+            if user_id in ai_history and ai_history[user_id]: 
+                ai_history[user_id].pop()
+            return "⚠️ Ошибка связи с нейросетью."
 
 # --- КОМАНДЫ И CALLBACK ДЛЯ ИИ ---
 @dp.message(Command("grok"))
-async def grok_command(message: Message, state: FSMContext):
+async def grok_command(message: Message):
     if message.from_user.id == ADMIN_ID:
         prompt = message.text.replace("/grok", "").strip()
         if not prompt:
@@ -179,7 +165,7 @@ async def grok_command(message: Message, state: FSMContext):
         await msg.edit_text(reply)
     else:
         ai_mode_users.add(message.from_user.id)
-        await message.answer("🤖 <b>Режим общения с нейросетью активирован!</b>\n\nПиши мне любые вопросы, отвечу бесплатно и запомню контекст диалога.", parse_mode="HTML", reply_markup=get_exit_ai_kb())
+        await message.answer("🤖 <b>Режим общения с нейросетью активирован!</b>\n\nЗадавай свои вопросы:", parse_mode="HTML", reply_markup=get_exit_ai_kb())
 
 @dp.callback_query(F.data == "grok_start")
 async def grok_start_callback(callback: CallbackQuery):
@@ -200,52 +186,6 @@ async def grok_stop_callback(callback: CallbackQuery):
 async def grok_admin_callback(callback: CallbackQuery):
     await callback.answer()
     await callback.message.answer("🤖 Чтобы спросить нейросеть, используй команду:\n<code>/grok твой вопрос</code>", parse_mode="HTML")
-
-# Используем семафор, чтобы бот делал не более 1 запроса к API одновременно
-api_limiter = asyncio.Semaphore(1)
-
-async def ask_ai(prompt: str) -> str:
-    if not GEMINI_API_KEY: return "⚠️ Ключ не задан."
-    
-    async with api_limiter:
-        try:
-            # Делаем небольшую паузу перед запросом, чтобы не спамить
-            await asyncio.sleep(2) 
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
-            payload = {"contents": [{"parts": [{"text": prompt}]}]}
-            
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, json=payload, timeout=20) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        return data['candidates'][0]['content']['parts'][0]['text'].strip()
-                    elif response.status == 429:
-                        return "⚠️ Нейросеть занята (лимит запросов). Подожди 10-20 секунд и попробуй снова."
-                    else:
-                        return f"⚠️ Ошибка API ({response.status})."
-        except Exception as e:
-            return "⚠️ Ошибка связи."
-
-@dp.message(CommandStart())
-async def start_cmd(message: Message):
-    await message.answer("👋 Привет! Пиши вопрос — отвечу.")
-
-@dp.message(F.text)
-async def chat_handler(message: Message):
-    # Если бот уже "думает", не даем пользователю спамить новые запросы
-    msg = await message.answer("🔄 Нейросеть думает (подожди пару секунд)...")
-    reply = await ask_ai(message.text)
-    await msg.edit_text(reply)
-
-class HealthCheck(BaseHTTPRequestHandler):
-    def do_GET(s): s.send_response(200); s.end_headers(); s.wfile.write(b"OK")
-    def log_message(self, format, *args): pass
-
-def run_server(): HTTPServer(("", PORT), HealthCheck).serve_forever()
-
-if __name__ == "__main__":
-    threading.Thread(target=run_server, daemon=True).start()
-    asyncio.run(dp.start_polling(bot))
 
 # --- ОСТАЛЬНАЯ ЛОГИКА БОТА ---
 @dp.message(Command("panel"), F.from_user.id == ADMIN_ID)
@@ -402,23 +342,27 @@ async def admin_reply(message: Message):
             await message.answer("✅ Ответ отправлен.")
         except: pass
 
-@dp.message(F.chat.id != ADMIN_ID)
+# --- ГЛОБАЛЬНЫЙ МЕНЕДЖЕР ТЕКСТОВЫХ СООБЩЕНИЙ ---
+@dp.message(F.text)
 async def chat_flow(message: Message):
-    users[message.from_user.id] = message.from_user.full_name
-    recent_chats[message.from_user.id] = message.from_user.full_name
-    
+    # Логика для пользователей, общающихся в режиме ИИ
     if message.from_user.id in ai_mode_users:
-        if message.text:
-            msg = await message.answer("🔄 Думаю...")
-            reply = await ask_free_ai(message.from_user.id, message.text)
-            await msg.edit_text(reply, reply_markup=get_exit_ai_kb())
+        msg = await message.answer("🔄 Думаю...")
+        reply = await ask_free_ai(message.from_user.id, message.text)
+        await msg.edit_text(reply, reply_markup=get_exit_ai_kb())
         return
 
-    header = f"📨 <b>От: {message.from_user.full_name}</b>\nID: <code>{message.from_user.id}</code>\n\n"
-    await bot.send_message(chat_id=ADMIN_ID, text=header, parse_mode="HTML")
-    msg = await message.send_copy(chat_id=ADMIN_ID)
-    forward_map[msg.message_id] = message.chat.id
+    # Логика пересылки админу для обычного общения
+    if message.chat.id != ADMIN_ID:
+        users[message.from_user.id] = message.from_user.full_name
+        recent_chats[message.from_user.id] = message.from_user.full_name
+        
+        header = f"📨 <b>От: {message.from_user.full_name}</b>\nID: <code>{message.from_user.id}</code>\n\n"
+        await bot.send_message(chat_id=ADMIN_ID, text=header, parse_mode="HTML")
+        msg = await message.send_copy(chat_id=ADMIN_ID)
+        forward_map[msg.message_id] = message.chat.id
 
+# --- ВЕБ-СЕРВЕР ДЛЯ UP-TIME НА RENDER ---
 class HealthCheck(BaseHTTPRequestHandler):
     def do_GET(s):
         s.send_response(200)
