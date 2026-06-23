@@ -6,7 +6,8 @@ from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiohttp import web, ClientSession
+from google import genai
+from aiohttp import web
 
 # ==============================================================================
 # 1. ИНИЦИАЛИЗАЦИЯ И ПРОВЕРКА ПЕРЕМЕННЫХ
@@ -15,9 +16,7 @@ BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
 PORT = int(os.environ.get("PORT", 10000))
 
-# Переменные администратора
 ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))  
-ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "")  
 
 if not BOT_TOKEN or not GEMINI_KEY:
     print("КРИТИЧЕСКАЯ ОШИБКА: Проверь TELEGRAM_BOT_TOKEN и GEMINI_API_KEY на Render!")
@@ -27,7 +26,9 @@ bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
-# Локальный файл базы данных
+# Инициализируем официальный клиент Gemini SDK
+ai_client = genai.Client(api_key=GEMINI_KEY)
+
 USERS_FILE = "users.txt"
 
 class BotStates(StatesGroup):
@@ -35,11 +36,6 @@ class BotStates(StatesGroup):
     admin_broadcast = State() 
     admin_private_id = State() 
     admin_private_msg = State() 
-
-# Используем стабильный CORS-прокси, сохраняя оригинальный формат запроса с ?key=
-# Это решает и проблему 429 (бан IP Render), и проблему авторизации 401
-BASE_URL = f"https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key={GEMINI_KEY}"
-GEMINI_PROXY_URL = f"https://corsproxy.io/?{BASE_URL}"
 
 # ==============================================================================
 # ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ (БАЗА ДАННЫХ В ТЕКСТОВОМ ФАЙЛЕ)
@@ -199,37 +195,44 @@ async def admin_download_db(message: types.Message):
         await message.answer("База еще не создана.")
 
 # ==============================================================================
-# 5. ХЕНДЛЕР ОБРАБОТКИ GEMINI ЧЕРЕЗ URL-CORS-PROXY
+# 5. ХЕНДЛЕР ОБРАБОТКИ GEMINI ЧЕРЕЗ ОФИЦИАЛЬНЫЙ SDK
 # ==============================================================================
 @dp.message(BotStates.ai_mode)
 async def handle_ai_request(message: types.Message):
     if not message.text: return
     await bot.send_chat_action(chat_id=message.chat.id, action="typing")
     
-    payload = {"contents": [{"parts": [{"text": message.text}]}]}
-
     try:
-        async with ClientSession() as session:
-            async with session.post(GEMINI_PROXY_URL, json=payload, timeout=20) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    ai_text = data['candidates'][0]['content']['parts'][0]['text']
-                    await message.answer(ai_text)
-                elif response.status == 429:
-                    await message.answer("⚠️ Ошибка 429: Превышены лимиты Google. Подождите минуту.")
-                elif response.status in [400, 401, 403]:
-                    await message.answer("⚠️ Ошибка ключа: Проверьте правильность GEMINI_API_KEY на Render!")
-                else:
-                    await message.answer(f"⚠️ Ошибка сервера: {response.status}")
+        # Запускаем синхронный вызов SDK в отдельном потоке, чтобы не вешать асинхронный таск бота
+        loop = asyncio.get_running_loop()
+        response = await loop.run_in_executor(
+            None, 
+            lambda: ai_client.models.generate_content(
+                model='gemini-2.5-flash',
+                contents=message.text,
+            )
+        )
+        if response and response.text:
+            await message.answer(response.text)
+        else:
+            await message.answer("⚠️ Пустой ответ от нейросети. Попробуйте перефразировать.")
+            
     except Exception as e:
-        print(f"Сбой сети: {e}", file=sys.stderr)
-        await message.answer("⚠️ Проблема с прокси-сервером. Повторите попытку через пару секунд.")
+        err_msg = str(e)
+        print(f"Ошибка Gemini SDK: {err_msg}", file=sys.stderr)
+        
+        if "429" in err_msg or "Quota" in err_msg:
+            await message.answer("⚠️ Превышен лимит запросов (429). Google ограничил IP хостинга. Подождите пару минут.")
+        elif "API key" in err_msg or "403" in err_msg or "400" in err_msg:
+            await message.answer("⚠️ Ошибка ключа: Проверьте правильность GEMINI_API_KEY в настройках Render!")
+        else:
+            await message.answer("⚠️ Произошла ошибка при генерации ответа. Попробуйте еще раз.")
 
 # ==============================================================================
 # 6. ВЕБ-СЕРВЕР И ЗАПУСК
 # ==============================================================================
 async def handle_render_ping(request):
-    return web.Response(text="Бот работает корректно через CORS-Proxy шлюз!", status=200)
+    return web.Response(text="Бот работает на официальном Google SDK!", status=200)
 
 async def main():
     app = web.Application()
