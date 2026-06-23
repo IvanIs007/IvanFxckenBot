@@ -439,6 +439,20 @@ async def inline_ai_query(inline_query: types.InlineQuery):
         
     await inline_query.answer(results, cache_time=2, is_personal=True)
 
+# Разруливаем эндпоинты в зависимости от префиксов
+    if chosen_model.startswith("hf/"):
+        actual_model = chosen_model.replace("hf/", "")
+        if "GLM-5.2" in actual_model:
+            actual_model = "zai-org/GLM-5.2"
+            
+        # Вместо общего v1/chat/completions шлем запрос напрямую в эндпоинт модели
+        current_endpoint = f"https://api-inference.huggingface.co/models/{actual_model}/v1/chat/completions"
+        current_key = HF_KEY
+    else:
+        current_endpoint = OPENROUTER_ENDPOINT
+        current_key = OPENROUTER_KEY
+        actual_model = chosen_model
+
 # ==============================================================================
 # 6. ДВУХУРОВНЕВОЕ МЕНЮ ВЫБОРА НЕЙРОСЕТЕЙ
 # ==============================================================================
