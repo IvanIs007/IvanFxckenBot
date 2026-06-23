@@ -6,11 +6,10 @@ from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiohttp import web
-from google import genai
+from aiohttp import web, ClientSession
 
 # ==============================================================================
-# 1. ИНИЦИАЛИЗАЦИЯ
+# 1. ИНИЦИАЛИЗАЦИЯ И ПРОВЕРКА ПЕРЕМЕННЫХ
 # ==============================================================================
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
@@ -20,15 +19,15 @@ if not BOT_TOKEN or not GEMINI_KEY:
     print("КРИТИЧЕСКАЯ ОШИБКА: Проверь TELEGRAM_BOT_TOKEN и GEMINI_API_KEY в Environment Variables на Render!")
     sys.exit(1)
 
-# Клиент Gemini автоматически подхватит GEMINI_API_KEY из окружения
-client = genai.Client()
-
 bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
 class BotStates(StatesGroup):
     ai_mode = State()
+
+# URL для работы с актуальной моделью Gemini 2.5 Flash напрямую
+GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_KEY}"
 
 # ==============================================================================
 # 2. КЛАВИАТУРЫ
@@ -81,7 +80,7 @@ async def handle_tracks(message: types.Message):
 async def handle_dice(message: types.Message):
     await message.answer_dice()
 
-# Запрос к Gemini 2.5 Flash
+# Запрос к Gemini 2.5 Flash через aiohttp (напрямую, без падающих библиотек)
 @dp.message(BotStates.ai_mode)
 async def handle_ai_request(message: types.Message):
     if not message.text:
@@ -89,23 +88,31 @@ async def handle_ai_request(message: types.Message):
         
     await bot.send_chat_action(chat_id=message.chat.id, action="typing")
 
+    # Формируем JSON структуру для официального API Google
+    payload = {
+        "contents": [{
+            "parts": [{"text": message.text}]
+        }]
+    }
+
     try:
-        # Выполняем синхронный запрос к API в отдельном потоке, чтобы не вешать асинхронный event loop
-        loop = asyncio.get_event_loop()
-        response = await loop.run_in_executor(
-            None, 
-            lambda: client.models.generate_content(
-                model='gemini-2.5-flash',
-                contents=message.text,
-            )
-        )
-        await message.answer(response.text)
+        async with ClientSession() as session:
+            async with session.post(GEMINI_URL, json=payload) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    # Извлекаем текст ответа из структуры Google API
+                    ai_text = data['candidates'][0]['content']['parts'][0]['text']
+                    await message.answer(ai_text)
+                elif response.status == 400 or response.status == 404:
+                    await message.answer("⚠️ Ошибка API (Неверный ключ). Проверь GEMINI_API_KEY в настройках Render!")
+                else:
+                    await message.answer(f"⚠️ Сервер Google ответил ошибкой: {response.status}")
     except Exception as e:
-        print(f"Ошибка Gemini API: {e}", file=sys.stderr)
-        await message.answer("⚠️ Произошла ошибка при обращении к нейросети. Попробуйте позже.")
+        print(f"Ошибка запроса: {e}", file=sys.stderr)
+        await message.answer("⚠️ Не удалось связаться с нейросетью. Попробуй позже.")
 
 # ==============================================================================
-# 4. ВЕБ-СЕРВЕР ДЛЯ RENDER PING
+# 4. ВЕБ-СЕРВЕР ДЛЯ RENDER PING И ЗАПУСК
 # ==============================================================================
 async def handle_render_ping(request):
     return web.Response(text="Бот онлайн внутри Docker!", status=200)
