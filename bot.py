@@ -10,8 +10,8 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 
-# Импортируем агрегатор нейросетей
-import g4f
+# Используем встроенный в aiogram легкий aiohttp для запросов к бесплатному агрегатору
+import aiohttp
 
 # --- НАСТРОЙКИ ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ---
 BOT_TOKEN = os.environ["BOT_TOKEN"]
@@ -31,7 +31,7 @@ recent_chats = {}
 forward_map = {}    
 ai_mode_users = set() 
 
-# Хранилище контекста диалогов для агрегатора G4F
+# Хранилище контекста диалогов для ИИ
 ai_history = {}  # Структура: {user_id: [{"role": "user", "content": "..."}, ...]}
 
 class AdminStates(StatesGroup):
@@ -98,49 +98,44 @@ async def start_cmd(message: Message):
             reply_markup=get_user_kb()
         )
 
-# --- БЕСПЛАТНЫЙ ИИ С ПОДДЕРЖКОЙ КОНТЕКСТА ЧЕРЕЗ АГРЕГАТОР G4F ---
+# --- БЕСПЛАТНЫЙ ИИ ЧЕРЕЗ СТАБИЛЬНЫЙ ВЕБ-АГРЕГАТОР ---
 async def ask_free_ai(user_id: int, prompt: str) -> str:
     try:
-        # Инициализируем историю для пользователя, если её нет
         if user_id not in ai_history:
             ai_history[user_id] = [
                 {"role": "system", "content": "Ты — крутой ИИ-ассистент в боте IvanFuckenBot. Отвечай кратко, современно, используй сленг и пиши строго по делу. Ты ведешь полноценный непрерывный диалог и помнишь всё, что пользователь писал ранее."}
             ]
             
-        # Добавляем реплику пользователя в историю
         ai_history[user_id].append({"role": "user", "content": prompt})
         
-        # Функция вызова агрегатора G4F в синхронном режиме
-        def _fetch():
-            response = g4f.ChatCompletion.create(
-                model=g4f.models.gpt_4o,  # Мощная модель, агрегатор сам выберет живой сервер
-                messages=ai_history[user_id],
-                stream=False
-            )
-            return response
-
-        # Запускаем тяжелый запрос в отдельном потоке, чтобы бот не зависал
-        reply = await asyncio.to_thread(_fetch)
+        # Отправляем JSON-запрос на отказоустойчивый keyless шлюз Pollinations AI
+        payload = {
+            "messages": ai_history[user_id],
+            "model": "openai"  # Использует быструю и мощную модель
+        }
         
-        if reply and str(reply).strip():
-            reply_text = str(reply).strip()
-            # Записываем ответ ИИ в историю
-            ai_history[user_id].append({"role": "assistant", "content": reply_text})
-            
-            # Если диалог слишком длинный, мягко подрезаем его, сохраняя системный промт
-            if len(ai_history[user_id]) > 14:
-                ai_history[user_id] = [ai_history[user_id][0]] + ai_history[user_id][-10:]
-                
-            return reply_text
-            
-        return "⚠️ Не удалось получить ответ от агрегатора. Попробуй еще раз!"
+        async with aiohttp.ClientSession() as session:
+            async with session.post("https://text.pollinations.ai/", json=payload, timeout=25) as response:
+                if response.status == 200:
+                    reply_text = await response.text()
+                    reply_text = reply_text.strip()
+                    
+                    if reply_text:
+                        ai_history[user_id].append({"role": "assistant", "content": reply_text})
+                        
+                        # Ограничиваем историю, чтобы бот не тратил лишнюю память
+                        if len(ai_history[user_id]) > 14:
+                            ai_history[user_id] = [ai_history[user_id][0]] + ai_history[user_id][-10:]
+                            
+                        return reply_text
+                        
+        return "⚠️ Не удалось получить ответ от серверов нейросети. Попробуй через минуту!"
         
     except Exception as e:
-        logger.error(f"Ошибка агрегатора G4F: {e}")
-        # В случае сбоя удаляем последний запрос юзера, чтобы не ломать хронологию
+        logger.error(f"Ошибка вызова ИИ: {e}")
         if user_id in ai_history and len(ai_history[user_id]) > 1:
             ai_history[user_id].pop()
-        return "⚠️ Все бесплатные сервера сейчас перегружены. Подожди пару секунд и отправь снова!"
+        return "⚠️ Не удалось подключиться к серверам нейросети. Попробуй через минутку!"
 
 # --- КОМАНДЫ И CALLBACK ДЛЯ ИИ ---
 @dp.message(Command("grok"))
@@ -150,7 +145,7 @@ async def grok_command(message: Message, state: FSMContext):
         if not prompt:
             await message.answer("Использование для админа: <code>/grok твой вопрос</code>", parse_mode="HTML")
             return
-        msg = await message.answer("🔄 Агрегатор думает...")
+        msg = await message.answer("🔄 Нейросеть думает...")
         reply = await ask_free_ai(message.from_user.id, prompt)
         await msg.edit_text(reply)
     else:
@@ -168,7 +163,6 @@ async def grok_stop_callback(callback: CallbackQuery):
     await callback.answer()
     if callback.from_user.id in ai_mode_users:
         ai_mode_users.remove(callback.from_user.id)
-    # Полностью очищаем память диалога при выходе
     if callback.from_user.id in ai_history:
         del ai_history[callback.from_user.id]
     await callback.message.answer("❌ Режим ИИ выключен. Контекст диалога полностью сброшен.", reply_markup=get_user_kb())
