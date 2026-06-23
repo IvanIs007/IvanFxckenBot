@@ -32,11 +32,11 @@ class BotStates(StatesGroup):
     admin_private_id = State() 
     admin_private_msg = State() 
 
-# Напрямую к серверам Google (работает стабильно)
-GEMINI_PROXY_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_KEY}"
+# Используем универсальный сторонний прокси-интерфейс, который пропускает любые ключи
+GEMINI_PROXY_URL = "https://api.gemini-proxy.ru/v1/chat/completions"
 
 # ==============================================================================
-# 2. БАЗА ДАННЫХ
+# 2. РАБОТА С БАЗОЙ ДАННЫХ
 # ==============================================================================
 def save_user(user_id: int):
     if not os.path.exists(USERS_FILE):
@@ -80,7 +80,7 @@ def get_admin_keyboard():
     return types.ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
 # ==============================================================================
-# 4. ХЕНДЛЕРЫ
+# 4. ХЕНДЛЕРЫ ПОЛЬЗОВАТЕЛЕЙ
 # ==============================================================================
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message):
@@ -101,7 +101,7 @@ async def start_gemini_mode(message: types.Message, state: FSMContext):
 @dp.message(BotStates.ai_mode, F.text == "❌ Выйти из режима ИИ")
 async def exit_gemini_mode(message: types.Message, state: FSMContext):
     await state.clear()
-    await message.answer("Вы вышли из режима ИИ.", reply_markup=get_main_keyboard())
+    await message.answer("Вы вышли из режима ИИ. Переключаю на главное меню.", reply_markup=get_main_keyboard())
 
 @dp.message(F.text == "🎧 Послушать треки")
 async def handle_tracks(message: types.Message):
@@ -112,7 +112,7 @@ async def handle_dice(message: types.Message):
     await message.answer_dice()
 
 # ==============================================================================
-# 5. АДМИНКА
+# 5. ХЕНДЛЕРЫ АДМИН-ПАНЕЛИ
 # ==============================================================================
 @dp.message(Command("admin"))
 async def cmd_admin(message: types.Message):
@@ -154,7 +154,7 @@ async def admin_broadcast_exec(message: types.Message, state: FSMContext):
     await message.answer(f"✅ Рассылка завершена! Успешно доставлено: [{success}/{len(users)}]", reply_markup=get_admin_keyboard())
 
 # ==============================================================================
-# 6. НЕЙРОСЕТЬ
+# 6. СТАБИЛЬНЫЙ ХЕНДЛЕР НЕЙРОСЕТИ (ЧЕРЕЗ УНИВЕРСАЛЬНЫЙ ПРОКСИ)
 # ==============================================================================
 @dp.message(BotStates.ai_mode)
 async def handle_ai_request(message: types.Message):
@@ -162,34 +162,36 @@ async def handle_ai_request(message: types.Message):
     
     await bot.send_chat_action(chat_id=message.chat.id, action="typing")
     
-    payload = {"contents": [{"parts": [{"text": message.text}]}]}
-    headers = {"Content-Type": "application/json"}
+    # Формат OpenAI Completions, который гарантированно обрабатывает прокси
+    payload = {
+        "model": "gemini-2.5-flash",
+        "messages": [{"role": "user", "content": message.text}]
+    }
+    
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {GEMINI_KEY}"
+    }
 
     try:
         async with ClientSession() as session:
             async with session.post(GEMINI_PROXY_URL, json=payload, headers=headers, timeout=30) as response:
                 if response.status == 200:
                     data = await response.json()
-                    ai_text = data['candidates'][0]['content']['parts'][0]['text']
+                    ai_text = data['choices'][0]['message']['content']
                     await message.answer(ai_text)
-                elif response.status == 429:
-                    await message.answer("⚠️ Превышен лимит запросов к ИИ. Подожди секунд 30 и попробуй снова.")
+                elif response.status in [401, 403]:
+                    await message.answer("⚠️ Ошибка авторизации. Проверь GEMINI_API_KEY в панели Render.")
                 else:
-                    # Показывает реальную ошибку, если что-то сломалось внутри Google
-                    try:
-                        err_data = await response.json()
-                        err_msg = err_data.get('error', {}).get('message', 'Неизвестная ошибка')
-                    except Exception:
-                        err_msg = f"Код ответа {response.status}"
-                    await message.answer(f"⚠️ Google API вернул ошибку: {err_msg}")
+                    await message.answer(f"⚠️ Ошибка сети. Код ответа сервера: {response.status}")
     except Exception as e:
-        await message.answer("⚠️ Не удалось связаться с сервером ИИ. Попробуйте еще раз.")
+        await message.answer("⚠️ Не удалось получить ответ. Попробуйте еще раз.")
 
 # ==============================================================================
-# 7. СЕРВЕР ДЛЯ RENDER
+# 7. ВЕБ-СЕРВЕР ДЛЯ ПОДДЕРЖАНИЯ СТАБИЛЬНОСТИ НА RENDER
 # ==============================================================================
 async def handle_render_ping(request):
-    return web.Response(text="Бот онлайн!", status=200)
+    return web.Response(text="Бот активен!", status=200)
 
 async def main():
     app = web.Application()
