@@ -12,7 +12,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiohttp import web, ClientSession, ClientTimeout
 
 # ==============================================================================
-# 1. СЧИТЫВАНИЕ НАСТРОЕК ИЗ РЕНДЕРА
+# 1. КОНФИГУРАЦИЯ И ПЕРЕМЕННЫЕ
 # ==============================================================================
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 OPENROUTER_KEY = os.environ.get("OPENROUTER_API_KEY")  
@@ -27,17 +27,17 @@ storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
 USERS_FILE = "users.txt"
-ADMIN_FILE = "admin_config.txt"  # Файл для вечного хранения ID первого владельца
+ADMIN_FILE = "admin_config.txt"
 
 class BotStates(StatesGroup):
     ai_mode = State()         
     admin_broadcast = State() 
     admin_private_id = State()
     admin_private_msg = State()
+    admin_reply_msg = State()  # Состояние быстрого ответа пользователю
 
 OPENROUTER_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions"
 
-# ОБНОВЛЕННАЯ СТАБИЛЬНАЯ БАЗА С ОБЯЗАТЕЛЬНОЙ GEMMA 4 IT
 MODELS_DATABASE = {
     "openrouter/free": "🤖 Автовыбор OpenRouter",
     "google/gemma-4-31b-it:free": "🧠 Google Gemma 4 31B IT",
@@ -45,40 +45,38 @@ MODELS_DATABASE = {
     "nvidia/nemotron-3-ultra:free": "⚡ Nemotron 3 Ultra",
     "poolside/laguna-m1:free": "🌊 Poolside Laguna M.1",
     "nvidia/nemotron-3-super:free": "💥 Nemotron 3 Super",
-    "openai/gpt-oss-120b:free": "🌌 OpenAI gpt-oss-120b",
-    "poolside/laguna-xs2:free": "🏖 Poolside Laguna XS.2",
-    "openai/gpt-oss-20b:free": "🌠 OpenAI gpt-oss-20b",
-    "nvidia/nemotron-3-nano-30b-a3b:free": "📟 Nemotron 3 Nano 30B",
-    "cohere/north-mini-code:free": "💻 Cohere North Mini Code",
-    "nvidia/nemotron-3-nano-omni:free": "👁 Nemotron 3 Nano Omni",
-    "nvidia/nemotron-nano-9b-v2:free": "📲 Nemotron Nano 9B v2",
-    "nvidia/nemotron-nano-12b-2-vl:free": "🎬 Nemotron Nano 12B VL",
-    "nvidia/llama-nemotron-embed-vl-1b-v2:free": "🗂 Llama Embed VL 1B"
+    "openai/gpt-oss-120b:free": "🌌 OpenAI gpt-oss-120b"
 }
 
 # ==============================================================================
-# 2. УПРАВЛЕНИЕ ДАННЫМИ И АВТОМАТИЧЕСКИЙ АДМИН
+# 2. СИНХРОНИЗАЦИЯ КОМАНД И МЕНЮ
 # ==============================================================================
+async def set_bot_commands(user_id: int, is_adm: bool):
+    """Динамически меняет список команд в меню Telegram кнопки (слева внизу)"""
+    commands = [
+        types.BotCommand(command="start", description="🚀 Перезапустить бота"),
+        types.BotCommand(command="ai", description="🤖 Режим нейросети"),
+        types.BotCommand(command="dice", description="🎲 Игра в кости"),
+    ]
+    if is_adm:
+        commands.append(types.BotCommand(command="admin", description="🔑 Панель управления"))
+    
+    try:
+        await bot.set_my_commands(commands, scope=types.BotCommandScopeChat(chat_id=user_id))
+    except Exception:
+        pass
+
 def get_or_set_admin(user_id: int) -> int:
-    """
-    Если админ еще не назначен, записывает первого написавшего в файл.
-    Если назначен — возвращает сохраненный ID.
-    """
     if os.path.exists(ADMIN_FILE):
         with open(ADMIN_FILE, "r") as f:
             content = f.read().strip()
-            if content.isdigit():
-                return int(content)
-    
-    # Если файла нет или он пуст — текущий пользователь становится админом навсегда
+            if content.isdigit(): return int(content)
     with open(ADMIN_FILE, "w") as f:
         f.write(str(user_id))
-    print(f" Назначен новый главный администратор бота! ID: {user_id}")
     return user_id
 
 def is_admin(user_id: int) -> bool:
-    if not os.path.exists(ADMIN_FILE):
-        return False
+    if not os.path.exists(ADMIN_FILE): return False
     with open(ADMIN_FILE, "r") as f:
         content = f.read().strip()
         return content.isdigit() and int(content) == user_id
@@ -91,10 +89,6 @@ def save_user(user_id: int):
     if str(user_id) not in users:
         with open(USERS_FILE, "a") as f: f.write(f"{user_id}\n")
 
-def get_users_count() -> int:
-    if not os.path.exists(USERS_FILE): return 0
-    with open(USERS_FILE, "r") as f: return len(f.read().splitlines())
-
 def get_all_users() -> list:
     if not os.path.exists(USERS_FILE): return []
     with open(USERS_FILE, "r") as f: return f.read().splitlines()
@@ -102,11 +96,13 @@ def get_all_users() -> list:
 # ==============================================================================
 # 3. КЛАВИАТУРЫ
 # ==============================================================================
-def get_main_keyboard():
+def get_main_keyboard(user_id: int):
     buttons = [
-        [types.KeyboardButton(text="🎧 Послушать треки"), types.KeyboardButton(text="🤖 Общение с ИИ")],
-        [types.KeyboardButton(text="🎲 Сыграть в кости")]
+        [types.KeyboardButton(text="🤖 Общение с ИИ"), types.KeyboardButton(text="🎲 Сыграть в кости")],
+        [types.KeyboardButton(text="✍️ Написать админу")]
     ]
+    if is_admin(user_id):
+        buttons.append([types.KeyboardButton(text="🔑 Админ Панель")])
     return types.ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
 def get_ai_keyboard():
@@ -119,222 +115,211 @@ def get_ai_keyboard():
 def get_admin_keyboard():
     buttons = [
         [types.KeyboardButton(text="📊 Статистика"), types.KeyboardButton(text="📢 Рассылка всем")],
-        [types.KeyboardButton(text="👤 Личное сообщение"), types.KeyboardButton(text="🚪 Выйти из админки")]
+        [types.KeyboardButton(text="👤 Выбрать юзера"), types.KeyboardButton(text="🚪 Выйти")]
     ]
     return types.ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
-def get_models_inline_keyboard(page: int = 0):
-    builder = InlineKeyboardBuilder()
-    items = list(MODELS_DATABASE.items())
-    per_page = 5  
-    start = page * per_page
-    end = start + per_page
-    
-    for model_id, name in items[start:end]:
-        short_id = model_id.replace("free", "").replace("/", "-")[:20]
-        builder.button(text=name, callback_data=f"set_{short_id}_{page}")
-    
-    builder.adjust(1)
-    
-    nav_buttons = []
-    if page > 0:
-        nav_buttons.append(types.InlineKeyboardButton(text="⬅️ Назад", callback_data=f"page_{page-1}"))
-    if end < len(items):
-        nav_buttons.append(types.InlineKeyboardButton(text="Вперед ➡️", callback_data=f"page_{page+1}"))
-    
-    if nav_buttons:
-        builder.row(*nav_buttons)
-        
-    return builder.as_markup()
-
 # ==============================================================================
-# 4. КЛИЕНТСКИЙ ИНТЕРФЕЙС И ИГРЫ
+# 4. ОБРАБОТКА ОСНОВНЫХ КОМАНД И ДИАЛОГОВ
 # ==============================================================================
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message):
     save_user(message.from_user.id)
-    # Активируем триггер первого запроса: кто первый нажал, тот и админ
     current_admin = get_or_set_admin(message.from_user.id)
+    adm_status = (current_admin == message.from_user.id)
     
-    welcome_text = "✌️ Привет! Бот успешно запущен и обновлен.\n\n"
-    if current_admin == message.from_user.id:
-        welcome_text += "🔑 **Ты распознан как единственный администратор бота!**\nДоступ к панели управления открыт по команде `/admin`."
-    else:
-        welcome_text += "Выбирай действия на кнопках в меню ниже!"
+    await set_bot_commands(message.from_user.id, adm_status)
+    
+    welcome = "👋 Привет! Я твой прокачанный бот.\nСинхронизация меню завершена!"
+    if adm_status:
+        welcome += "\n\n🔑 **Ты зафиксирован как админ.** Команда `/admin` добавлена в меню!"
         
-    await message.answer(welcome_text, reply_markup=get_main_keyboard(), parse_mode="Markdown")
+    await message.answer(welcome, reply_markup=get_main_keyboard(message.from_user.id))
 
-@dp.message(Command("ai"))
-@dp.message(F.text == "🤖 Общение с ИИ")
-async def start_ai_mode(message: types.Message, state: FSMContext):
-    await state.set_state(BotStates.ai_mode)
-    data = await state.get_data()
-    current_model = data.get("current_model", "openrouter/free")
-    model_name = MODELS_DATABASE.get(current_model, "Автовыбор")
-    
-    await message.answer(
-        f"🤖 **Режим ИИ активирован!**\nТекущая модель: `{model_name}`\n\nЗадай свой вопрос:",
-        reply_markup=get_ai_keyboard(), parse_mode="Markdown"
-    )
-
-@dp.message(BotStates.ai_mode, F.text == "⚙️ Выбрать нейросеть")
-async def show_models_menu(message: types.Message):
-    await message.answer("Выберите бесплатную нейросеть:", reply_markup=get_models_inline_keyboard(0))
-
-@dp.callback_query(F.data.startswith("page_"))
-async def process_model_page(callback: types.CallbackQuery):
-    page = int(callback.data.split("_")[1])
-    await callback.message.edit_reply_markup(reply_markup=get_models_inline_keyboard(page))
-    await callback.answer()
-
-@dp.callback_query(F.data.startswith("set_"))
-async def process_set_model(callback: types.CallbackQuery, state: FSMContext):
-    parts = callback.data.split("_")
-    target_short = parts[1]
-    
-    full_model_id = "openrouter/free"
-    for m_id in MODELS_DATABASE.keys():
-        check_str = m_id.replace("free", "").replace("/", "-")[:20]
-        if check_str == target_short:
-            full_model_id = m_id
-            break
-            
-    await state.update_data(current_model=full_model_id)
-    model_name = MODELS_DATABASE[full_model_id]
-    
-    await callback.message.edit_text(f"✅ Установлена модель:\n**{model_name}**\n\nЗадавайте ваш вопрос!")
-    await callback.answer()
-
-@dp.message(BotStates.ai_mode, F.text == "❌ Выйти из режима ИИ")
-async def exit_ai_mode(message: types.Message, state: FSMContext):
-    await state.clear()
-    await message.answer("Вы вышли из режима ИИ.", reply_markup=get_main_keyboard())
-
-@dp.message(F.text == "🎧 Послушать треки")
-async def handle_tracks(message: types.Message):
-    await message.answer("🎵 Раздел аудиозаписей находится в разработке.")
-
+@dp.message(Command("dice"))
 @dp.message(F.text == "🎲 Сыграть в кости")
 async def handle_dice(message: types.Message):
-    await message.answer("🎲 Игра началась! Мой бросок:")
+    await message.answer("🎲 Мой бросок:")
     bot_msg = await message.answer_dice()
-    bot_score = bot_msg.dice.value
     await asyncio.sleep(4) 
     
-    await message.answer("🎲 Теперь твой бросок:")
+    await message.answer("🎲 Твой бросок:")
     user_msg = await message.answer_dice()
-    user_score = user_msg.dice.value
     await asyncio.sleep(4)
     
-    result_text = f"🤖 Мои очки: **{bot_score}**\n👤 Твои очки: **{user_score}**\n\n"
-    if bot_score > user_score:
-        result_text += random.choice(["Ха! Я победил! Слава роботам! 🤖🦾", "Изи вин для ИИ! 😎"])
-    elif user_score > bot_score:
-        result_text += random.choice(["Ого, ты победил! Подкрутил кубики? 🧐🎉", "Чистая победа человека над машиной! ✊"])
-    else:
-        result_text += "Ничья! Мы достойные соперники друг друга. 🤝"
+    b, u = bot_msg.dice.value, user_msg.dice.value
+    res = f"🤖 ИИ: **{b}** vs 👤 Ты: **{u}**\n\n"
+    if b > u: res += random.choice(["Я победил! Слава машинам! 🦾", "Изи вин для ИИ! 😎"])
+    elif u > b: res += random.choice(["Ух ты, победа за тобой! 🎉", "Кожаный мешок сегодня удачливее ✊"])
+    else: res += "Ничья! Жмём руки 🤝"
+    await message.answer(res, parse_mode="Markdown")
+
+# --- ОБРАТНАЯ СВЯЗЬ С АДМИНОМ ---
+@dp.message(F.text == "✍️ Написать админу")
+async def ask_admin_start(message: types.Message, state: FSMContext):
+    if is_admin(message.from_user.id):
+        await message.answer("Ты сам администратор! Используй панель.")
+        return
+    await message.answer("📝 Напиши текст твоего обращения/вопроса, и админ сразу его получит:")
+    await state.set_state(BotStates.admin_private_msg) # Временный перехват сообщения
+
+@dp.message(BotStates.admin_private_msg)
+async def forward_to_admin(message: types.Message, state: FSMContext):
+    await state.clear()
+    
+    if not os.path.exists(ADMIN_FILE):
+        await message.answer("Администратор бота ещё не зарегистрирован.")
+        return
         
-    await message.answer(result_text, parse_mode="Markdown")
+    with open(ADMIN_FILE, "r") as f:
+        adm_id = int(f.read().strip())
+        
+    builder = InlineKeyboardBuilder()
+    builder.button(text="✍️ Ответить", callback_data=f"reply_to_{message.from_user.id}")
+    
+    username = f"@{message.from_user.username}" if message.from_user.username else "Нет юзернейма"
+    
+    # Пересылаем сообщение админу
+    await bot.send_message(
+        chat_id=adm_id,
+        text=f"📬 **Новое сообщение в поддержку!**\n\n"
+             f"👤 От: {message.from_user.full_name} ({username})\n"
+             f"🆔 ID: `{message.from_user.id}`\n"
+             f"💬 Текст:\n_{message.text}_",
+        parse_mode="Markdown",
+        reply_markup=builder.as_markup()
+    )
+    await message.answer("✅ Твоё сообщение отправлено! Администратор ответит в ближайшее время.")
 
 # ==============================================================================
-# 5. АВТОМАТИЧЕСКАЯ И СТАБИЛЬНАЯ АДМИНКА
+# 5. ДИНАМИЧЕСКАЯ АДМИНКА И БЫСТРЫЕ ОТВЕТЫ
 # ==============================================================================
 @dp.message(Command("admin"))
+@dp.message(F.text == "🔑 Админ Панель")
 async def cmd_admin(message: types.Message):
-    if not is_admin(message.from_user.id):
-        return  # Не админов бот полностью игнорирует
-    await message.answer("🔑 Доступ подтвержден. Панель администратора открыта!", reply_markup=get_admin_keyboard())
+    if not is_admin(message.from_user.id): return
+    await message.answer("🔑 Панель управления открыта!", reply_markup=get_admin_keyboard())
 
-@dp.message(F.text == "🚪 Выйти из админки")
+@dp.message(F.text == "🚪 Выйти")
 async def exit_admin(message: types.Message):
     if not is_admin(message.from_user.id): return
-    await message.answer("Вы вышли из админ-панели.", reply_markup=get_main_keyboard())
+    await message.answer("Вы вышли из админки.", reply_markup=get_main_keyboard(message.from_user.id))
 
 @dp.message(F.text == "📊 Статистика")
 async def admin_stats(message: types.Message):
     if not is_admin(message.from_user.id): return
-    count = get_users_count()
-    await message.answer(f"📊 **Статистика бота:**\n\nВсего пользователей в базе: `{count}`", parse_mode="Markdown")
+    await message.answer(f"📊 **Всего юзеров в базе:** `{len(get_all_users())}`", parse_mode="Markdown")
 
-@dp.message(F.text == "📢 Рассылка всем")
-async def admin_broadcast_start(message: types.Message, state: FSMContext):
+# --- БЫСТРЫЙ ВЫБОР ЮЗЕРА ДЛЯ СВЯЗИ ---
+@dp.message(F.text == "👤 Выбрать юзера")
+async def choose_user_menu(message: types.Message):
     if not is_admin(message.from_user.id): return
-    await state.set_state(BotStates.admin_broadcast)
-    await message.answer("Введите текст рассылки для всех пользователей:", 
-                         reply_markup=types.ReplyKeyboardMarkup(keyboard=[[types.KeyboardButton(text="❌ Отмена")]], resize_keyboard=True))
-
-@dp.message(BotStates.admin_broadcast)
-async def admin_broadcast_exec(message: types.Message, state: FSMContext):
-    if message.text == "❌ Отмена":
-        await state.clear()
-        await message.answer("Рассылка отменена.", reply_markup=get_admin_keyboard())
-        return
-        
     users = get_all_users()
-    success, failed = 0, 0
-    await message.answer("⏳ Рассылка запущена...")
-    
-    for user_id in users:
-        try:
-            await bot.send_message(chat_id=int(user_id), text=message.text)
-            success += 1
-            await asyncio.sleep(0.05)
-        except Exception:
-            failed += 1
-            
-    await state.clear()
-    await message.answer(f"📢 **Итоги рассылки:**\n\nДоставлено: `{success}`\nНе дошло: `{failed}`", 
-                         reply_markup=get_admin_keyboard(), parse_mode="Markdown")
-
-@dp.message(F.text == "👤 Личное сообщение")
-async def admin_private_start(message: types.Message, state: FSMContext):
-    if not is_admin(message.from_user.id): return
-    await state.set_state(BotStates.admin_private_id)
-    await message.answer("Введите числовой Telegram ID пользователя:", 
-                         reply_markup=types.ReplyKeyboardMarkup(keyboard=[[types.KeyboardButton(text="❌ Отмена")]], resize_keyboard=True))
-
-@dp.message(BotStates.admin_private_id)
-async def admin_private_get_id(message: types.Message, state: FSMContext):
-    if message.text == "❌ Отмена":
-        await state.clear()
-        await message.answer("Отменено.", reply_markup=get_admin_keyboard())
-        return
-    if not message.text.isdigit():
-        await message.answer("ID должен состоять только из цифр. Повторите ввод:")
+    if not users:
+        await message.answer("База данных пользователей пуста.")
         return
         
-    await state.update_data(target_user_id=message.text)
-    await state.set_state(BotStates.admin_private_msg)
-    await message.answer(f"ID {message.text} сохранен. Теперь напишите текст сообщения:")
+    builder = InlineKeyboardBuilder()
+    # Показываем последние 10 пользователей для быстрого клика
+    for u_id in users[-10:]:
+        builder.button(text=f"Написать ID: {u_id}", callback_data=f"reply_to_{u_id}")
+    builder.adjust(1)
+    await message.answer("Выберите пользователя из списка последних активных:", reply_markup=builder.as_markup())
 
-@dp.message(BotStates.admin_private_msg)
-async def admin_private_send(message: types.Message, state: FSMContext):
-    if message.text == "❌ Отмена":
+@dp.callback_query(F.data.startswith("reply_to_"))
+async def setup_reply_state(callback: types.CallbackQuery, state: FSMContext):
+    target_id = callback.data.split("_")[2]
+    await state.update_data(reply_target=target_id)
+    await state.set_state(BotStates.admin_reply_msg)
+    await callback.message.answer(f"✍️ Введите ответ для пользователя `{target_id}` (или нажмите /cancel для отмены):")
+    await callback.answer()
+
+@dp.message(BotStates.admin_reply_msg)
+async def send_reply_from_admin(message: types.Message, state: FSMContext):
+    if message.text == "/cancel":
         await state.clear()
         await message.answer("Отменено.", reply_markup=get_admin_keyboard())
         return
         
     data = await state.get_data()
-    target_id = int(data.get("target_user_id"))
+    target_id = int(data.get("reply_target"))
+    await state.clear()
     
     try:
-        await bot.send_message(chat_id=target_id, text=f"✉️ **Сообщение от администратора:**\n\n{message.text}", parse_mode="Markdown")
-        await message.answer("✅ Письмо успешно доставлено адресату!")
+        await bot.send_message(chat_id=target_id, text=f"✉️ **Ответ от администратора:**\n\n{message.text}", parse_mode="Markdown")
+        await message.answer("✅ Ответ успешно доставлен!")
     except Exception as e:
-        await message.answer(f"❌ Не удалось отправить. Ошибка: {e}")
-        
+        await message.answer(f"❌ Не доставлено. Ошибка: {e}")
+    await message.answer("Панель админа:", reply_markup=get_admin_keyboard())
+
+# --- МАССОВАЯ РАССЫЛКА ---
+@dp.message(F.text == "📢 Рассылка всем")
+async def broadcast_start(message: types.Message, state: FSMContext):
+    if not is_admin(message.from_user.id): return
+    await state.set_state(BotStates.admin_broadcast)
+    await message.answer("Введите текст рассылки (или /cancel):")
+
+@dp.message(BotStates.admin_broadcast)
+async def broadcast_exec(message: types.Message, state: FSMContext):
+    if message.text == "/cancel":
+        await state.clear()
+        await message.answer("Отменено.", reply_markup=get_admin_keyboard())
+        return
     await state.clear()
-    await message.answer("Возврат в меню администратора.", reply_markup=get_admin_keyboard())
+    users = get_all_users()
+    s, f = 0, 0
+    for u in users:
+        try:
+            await bot.send_message(chat_id=int(u), text=message.text)
+            s += 1
+            await asyncio.sleep(0.04)
+        except Exception: f += 1
+    await message.answer(f"📢 Выполнено!\nУспешно: `{s}`\nОшибок: `{f}`", reply_markup=get_admin_keyboard(), parse_mode="Markdown")
 
 # ==============================================================================
-# 6. ИИ ОБРАБОТЧИК (БЕЗ ТАЙМАУТОВ СТРИМИНГА)
+# 6. РЕЖИМ ИИ И ПЛАВНАЯ КОСМЕТИЧЕСКАЯ АНИМАЦИЯ (STREAMING С КУРСOРОМ)
 # ==============================================================================
+@dp.message(Command("ai"))
+@dp.message(F.text == "🤖 Общение с ИИ")
+async def start_ai(message: types.Message, state: FSMContext):
+    await state.set_state(BotStates.ai_mode)
+    data = await state.get_data()
+    model = data.get("current_model", "openrouter/free")
+    await message.answer(f"🤖 Режим ИИ запущен!\nТекущая модель: `{MODELS_DATABASE.get(model)}`", reply_markup=get_ai_keyboard())
+
+@dp.message(BotStates.ai_mode, F.text == "⚙️ Выбрать нейросеть")
+async def select_ai_menu(message: types.Message):
+    builder = InlineKeyboardBuilder()
+    for m_id, name in MODELS_DATABASE.items():
+        short = m_id.replace("free", "").replace("/", "-")[:20]
+        builder.button(text=name, callback_data=f"ai_{short}")
+    builder.adjust(1)
+    await message.answer("Выберите модель:", reply_markup=builder.as_markup())
+
+@dp.callback_query(F.data.startswith("ai_"))
+async def save_ai_selection(callback: types.CallbackQuery, state: FSMContext):
+    short = callback.data.split("_")[1]
+    full = "openrouter/free"
+    for m_id in MODELS_DATABASE.keys():
+        if short in m_id.replace("free", "").replace("/", "-"):
+            full = m_id
+            break
+    await state.update_data(current_model=full)
+    await callback.message.edit_text(f"✅ Выбрана модель: **{MODELS_DATABASE[full]}**")
+    await callback.answer()
+
+@dp.message(BotStates.ai_mode, F.text == "❌ Выйти из режима ИИ")
+async def exit_ai(message: types.Message, state: FSMContext):
+    await state.clear()
+    await message.answer("Вы вышли из режима ИИ.", reply_markup=get_main_keyboard(message.from_user.id))
+
+# --- ПЛАВНАЯ АНИМАЦИЯ МЫШЛЕНИЯ ---
 @dp.message(BotStates.ai_mode)
-async def handle_ai_request(message: types.Message, state: FSMContext):
-    if not message.text or message.text in ["❌ Выйти из режима ИИ", "⚙️ Выбрать нейросеть"]: return 
+async def ai_streaming_handler(message: types.Message, state: FSMContext):
+    if not message.text or message.text in ["❌ Выйти из режима ИИ", "⚙️ Выбрать нейросеть"]: return
     
     await bot.send_chat_action(chat_id=message.chat.id, action="typing")
-    status_msg = await message.answer("🧠 *Нейросеть генерирует ответ (Deep Search)...*", parse_mode="Markdown")
+    status_msg = await message.answer("⚡ *Думаю...* 🤖", parse_mode="Markdown")
     
     user_data = await state.get_data()
     chosen_model = user_data.get("current_model", "openrouter/free")
@@ -344,77 +329,68 @@ async def handle_ai_request(message: types.Message, state: FSMContext):
         "messages": [{"role": "user", "content": message.text}],
         "stream": True  
     }
+    headers = {"Authorization": f"Bearer {OPENROUTER_KEY}", "Content-Type": "application/json"}
     
-    headers = {
-        "Authorization": f"Bearer {OPENROUTER_KEY}",
-        "Content-Type": "application/json",
-        "HTTP-Referer": "https://render.com", 
-        "X-Title": "Telegram Multibot" 
-    }
-
     full_response = ""
-    last_ui_update_text = ""
-    counter = 0
-    timeout = ClientTimeout(total=None, connect=30, sock_read=300)
+    last_text = ""
+    update_interval = 0.5 # Интервал анимации в секундах
+    last_update_time = asyncio.get_event_loop().time()
+    
+    # Косметические индикаторы прогресса
+    cursors = [" ⏳", " ⚡", " 🤖", " ●"]
 
     try:
-        async with ClientSession(timeout=timeout) as session:
+        async with ClientSession(timeout=ClientTimeout(total=None)) as session:
             async with session.post(OPENROUTER_ENDPOINT, json=payload, headers=headers) as response:
                 if response.status != 200:
-                    await status_msg.edit_text(f"⚠️ Ошибка OpenRouter ({response.status}). Смените модель.")
+                    await status_msg.edit_text("⚠️ Ошибка OpenRouter. Смените модель.")
                     return
 
                 async for line in response.content:
                     if not line: continue
-                    decoded_line = line.decode('utf-8').strip()
-                    if not decoded_line.startswith("data:"): continue
-                    cleaned_line = decoded_line[5:].strip()
-                    if cleaned_line == "[DONE]": break
+                    decoded = line.decode('utf-8').strip()
+                    if not decoded.startswith("data:"): continue
+                    cleaned = decoded[5:].strip()
+                    if cleaned == "[DONE]": break
                         
                     try:
-                        chunk_data = json.loads(cleaned_line)
-                        if 'choices' in chunk_data and len(chunk_data['choices']) > 0:
-                            content = chunk_data['choices'][0].get('delta', {}).get('content', '')
-                            full_response += content
-                            counter += 1
-                            
-                            if counter % 35 == 0 and full_response.strip() != last_ui_update_text:
-                                last_ui_update_text = full_response.strip()
+                        chunk = json.loads(cleaned)
+                        content = chunk['choices'][0].get('delta', {}).get('content', '')
+                        full_response += content
+                        
+                        current_time = asyncio.get_event_loop().time()
+                        # Плавное обновление UI, чтобы не упереться в лимиты Telegram API
+                        if current_time - last_update_time > update_interval:
+                            animated_text = full_response + random.choice(cursors)
+                            if animated_text.strip() != last_text:
                                 try:
-                                    await status_msg.edit_text(last_ui_update_text[:4000])
+                                    await status_msg.edit_text(animated_text[:4000])
+                                    last_text = animated_text.strip()
+                                    last_update_time = current_time
                                 except Exception: pass
                     except Exception: continue
 
+        # Финальный красивый выгруз готового ответа без курсоров
         if full_response.strip():
-            if len(full_response) <= 4096:
-                await status_msg.edit_text(full_response)
-            else:
-                await status_msg.delete()
-                for x in range(0, len(full_response), 4096):
-                    await message.answer(full_response[x:x+4096])
+            await status_msg.edit_text(full_response)
         else:
-            await status_msg.edit_text("⚠️ Ошибка: пустой ответ. Смените модель.")
-            
+            await status_msg.edit_text("⚠️ Не удалось получить ответ.")
     except Exception:
-        await status_msg.edit_text("⚠️ Ошибка сети OpenRouter при глубоком поиске. Попробуйте еще раз.")
+        await status_msg.edit_text("⚠️ Произошла ошибка сети.")
 
 # ==============================================================================
-# 7. WEB SERVER RUNNER
+# 7. СТАРТ WEB-СЕРВЕРА
 # ==============================================================================
-async def handle_render_ping(request):
-    return web.Response(text="Бот активен!", status=200)
+async def handle_ping(request): return web.Response(text="Бот онлайн!", status=200)
 
 async def main():
     app = web.Application()
-    app.router.add_get('/', handle_render_ping)
+    app.router.add_get('/', handle_ping)
     runner = web.AppRunner(app)
     await runner.setup()
     await web.TCPSite(runner, host='0.0.0.0', port=PORT).start()
-
-    try:
-        await dp.start_polling(bot)
-    finally:
-        await runner.cleanup()
+    try: await dp.start_polling(bot)
+    finally: await runner.cleanup()
 
 if __name__ == '__main__':
     asyncio.run(main())
