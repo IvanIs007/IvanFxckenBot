@@ -9,9 +9,7 @@ from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-
-# Возвращаем g4f
-import g4f
+import aiohttp
 
 # --- НАСТРОЙКИ ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ---
 BOT_TOKEN = os.environ["BOT_TOKEN"]
@@ -98,40 +96,50 @@ async def start_cmd(message: Message):
             reply_markup=get_user_kb()
         )
 
-# --- РАБОТА С G4F (С ИСТОРИЕЙ СООБЩЕНИЙ) ---
+# --- БЕСПЛАТНЫЙ И СТАБИЛЬНЫЙ ИИ (БЕЗ КЛЮЧЕЙ) ---
 async def ask_free_ai(user_id: int, prompt: str) -> str:
     try:
         if user_id not in ai_history:
             ai_history[user_id] = [
-                {"role": "system", "content": "Ты — IvanFuckenBot. Отвечай кратко, используй сленг и пиши строго по делу."}
+                {"role": "system", "content": "Ты — IvanFuckenBot, крутой ИИ-ассистент. Отвечай кратко, используй современный сленг, пиши строго по делу и на русском языке."}
             ]
+        
         ai_history[user_id].append({"role": "user", "content": prompt})
-
-        # Запускаем синхронную g4f в отдельном потоке, чтобы бот не зависал
-        response = await asyncio.to_thread(
-            g4f.ChatCompletion.create,
-            model="gpt-4o",
-            messages=ai_history[user_id],
-        )
-
-        if response:
-            ai_history[user_id].append({"role": "assistant", "content": response})
-            
-            # Обрезаем историю диалога, чтобы контекст не раздувался
-            if len(ai_history[user_id]) > 8:
-                ai_history[user_id] = [ai_history[user_id][0]] + ai_history[user_id][-6:]
-                
-            return response
-        else:
-            if len(ai_history[user_id]) > 1:
-                ai_history[user_id].pop()
-            return "⚠️ Провайдер g4f вернул пустой ответ. Попробуй еще раз."
-            
+        
+        # Используем стабильный публичный шлюз без авторизации
+        url = "https://nexra.aryahcr.cc/api/chat/gpt"
+        headers = {"Content-Type": "application/json"}
+        payload = {
+            "messages": ai_history[user_id],
+            "stream": False
+        }
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload, headers=headers, timeout=15) as response:
+                if response.status == 200:
+                    res_json = await response.json()
+                    # Извлекаем текст ответа в зависимости от формата ответа шлюза
+                    reply_text = res_json.get("gpt") or res_json.get("reply") or res_json.get("content")
+                    
+                    if not reply_text and "text" in res_json:
+                        reply_text = res_json["text"]
+                        
+                    if reply_text:
+                        reply_text = str(reply_text).strip()
+                        ai_history[user_id].append({"role": "assistant", "content": reply_text})
+                        
+                        # Мягко чистим историю, чтобы не перегружать память
+                        if len(ai_history[user_id]) > 10:
+                            ai_history[user_id] = [ai_history[user_id][0]] + ai_history[user_id][-6:]
+                        return reply_text
+                        
+        return "⚠️ Сервер перегружен. Пожалуйста, отправь сообщение еще раз!"
+        
     except Exception as e:
-        logger.error(f"Ошибка G4F: {e}")
+        logger.error(f"Ошибка ИИ шлюза: {e}")
         if user_id in ai_history and len(ai_history[user_id]) > 1:
             ai_history[user_id].pop()
-        return "⚠️ Не удалось получить ответ через G4F. Сервер перегружен, повтори запрос."
+        return "⚠️ Не удалось соединиться с ИИ. Попробуй снова через пару секунд."
 
 # --- КОМАНДЫ И CALLBACK ДЛЯ ИИ ---
 @dp.message(Command("grok"))
