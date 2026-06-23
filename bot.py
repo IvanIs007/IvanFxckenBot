@@ -9,15 +9,15 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiohttp import web, ClientSession
 
 # ==============================================================================
-# 1. ИНИЦИАЛИЗАЦИЯ И ПРОВЕРКА ПЕРЕМЕННЫХ
+# 1. НАСТРОЙКА ПЕРЕМЕННЫХ ОКРУЖЕНИЯ
 # ==============================================================================
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
 PORT = int(os.environ.get("PORT", 10000))
-ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))  
+ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))  # Твой Telegram ID (для админки)
 
 if not BOT_TOKEN or not GEMINI_KEY:
-    print("КРИТИЧЕСКАЯ ОШИБКА: Проверь TELEGRAM_BOT_TOKEN и GEMINI_API_KEY в Environment Variables!")
+    print("КРИТИЧЕСКАЯ ОШИБКА: Проверь TELEGRAM_BOT_TOKEN и GEMINI_API_KEY в Render!")
     sys.exit(1)
 
 bot = Bot(token=BOT_TOKEN)
@@ -32,16 +32,19 @@ class BotStates(StatesGroup):
     admin_private_id = State() 
     admin_private_msg = State() 
 
-# Используем стабильный reverse-proxy эндпоинт для Gemini API
-GEMINI_PROXY_URL = f"https://gateway.ai.cloudflare.com/v1/public/gemini/v1/models/gemini-2.5-flash:generateContent?key={GEMINI_KEY}"
+# ==============================================================================
+# МЕСТО ДЛЯ ТВОЕЙ ССЫЛКИ CLOUDFLARE AI GATEWAY
+# ==============================================================================
+# Вставь скопированную ссылку из Cloudflare вместо примера ниже.
+# Главное — оставь в самом конце строчки: /v1/models/gemini-2.5-flash:generateContent?key={GEMINI_KEY}
+#
+# ПРИМЕР: 
+# GEMINI_PROXY_URL = f"https://gateway.ai.cloudflare.com/v1/12345abcde/my-gemini-bot/gemini/v1/models/gemini-2.5-flash:generateContent?key={GEMINI_KEY}"
 
-# Если верхний вариант будет сбоить, вот резервный стабильный шлюз (раскомментируй если что):
-# GEMINI_PROXY_URL = f"https://gemini.api.proxy.com/v1/models/gemini-2.5-flash:generateContent?key={GEMINI_KEY}"
-# Для текущего решения используем чистый альтернативный прокси-базовый URL:
-GEMINI_PROXY_URL = f"https://google-ai.chatgpt-proxy.workers.dev/v1/models/gemini-2.5-flash:generateContent?key={GEMINI_KEY}"
+GEMINI_PROXY_URL = f"https://gateway.ai.cloudflare.com/v1/https://gateway.ai.cloudflare.com/v1/42b17838faa1c270c8974a82d80aba1b/my-gemini-bot/compat/chat/completions/gemini/v1/models/gemini-2.5-flash:generateContent?key={GEMINI_KEY}"
 
 # ==============================================================================
-# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ (БАЗА ДАННЫХ В ТЕКСТОВОМ ФАЙЛЕ)
+# 2. РАБОТА С БАЗОЙ ДАННЫХ (ФАЙЛ)
 # ==============================================================================
 def save_user(user_id: int):
     if not os.path.exists(USERS_FILE):
@@ -63,7 +66,7 @@ def get_all_users() -> list:
     with open(USERS_FILE, "r") as f: return f.read().splitlines()
 
 # ==============================================================================
-# 2. КЛАВИАТУРЫ
+# 3. КЛАВИАТУРЫ
 # ==============================================================================
 def get_main_keyboard():
     buttons = [
@@ -85,7 +88,7 @@ def get_admin_keyboard():
     return types.ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
 # ==============================================================================
-# 3. ХЕНДЛЕРЫ ПОЛЬЗОВАТЕЛЕЙ
+# 4. ХЕНДЛЕРЫ ПОЛЬЗОВАТЕЛЕЙ
 # ==============================================================================
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message):
@@ -117,25 +120,88 @@ async def handle_dice(message: types.Message):
     await message.answer_dice()
 
 # ==============================================================================
-# 4. ХЕНДЛЕР АДМИНКИ
+# 5. ХЕНДЛЕРЫ АДМИН-ПАНЕЛИ
 # ==============================================================================
 @dp.message(Command("admin"))
 async def cmd_admin(message: types.Message):
     if message.from_user.id != ADMIN_ID: return  
-    await message.answer("🔑 Добро пожаловать в панель администратора, Босс!", reply_markup=get_admin_keyboard())
+    await message.answer("🔑 Панель администратора открыта, Босс!", reply_markup=get_admin_keyboard())
 
 @dp.message(F.text == "🚪 Выйти из админки")
 async def exit_admin(message: types.Message):
     if message.from_user.id != ADMIN_ID: return
     await message.answer("Вышли из панели управления.", reply_markup=get_main_keyboard())
 
+@dp.message(F.text == "📊 Статистика")
+async def admin_stats(message: types.Message):
+    if message.from_user.id != ADMIN_ID: return
+    count = get_users_count()
+    await message.answer(f"📊 **Статистика бота:**\n\nВсего уникальных пользователей: `{count}`")
+
+@dp.message(F.text == "📢 Рассылка")
+async def admin_broadcast_start(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID: return
+    await state.set_state(BotStates.admin_broadcast)
+    await message.answer("📢 Введите текст для рассылки всем пользователям:")
+
+@dp.message(BotStates.admin_broadcast)
+async def admin_broadcast_exec(message: types.Message, state: FSMContext):
+    await state.clear()
+    users = get_all_users()
+    if not users:
+        await message.answer("База данных пуста.")
+        return
+    await message.answer(f"🚀 Начинаю рассылку для {len(users)} пользователей...")
+    success = 0
+    for user_id in users:
+        try:
+            await bot.send_message(chat_id=int(user_id), text=message.text)
+            success += 1
+            await asyncio.sleep(0.05)  
+        except Exception: pass
+    await message.answer(f"✅ Рассылка завершена! Успешно доставлено: [{success}/{len(users)}]", reply_markup=get_admin_keyboard())
+
+@dp.message(F.text == "✉️ Написать пользователю")
+async def admin_private_start(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID: return
+    await state.set_state(BotStates.admin_private_id)
+    await message.answer("👤 Введите Telegram ID пользователя:")
+
+@dp.message(BotStates.admin_private_id)
+async def admin_private_id_rcv(message: types.Message, state: FSMContext):
+    if not message.text.isdigit():
+        await message.answer("Ошибка: ID должен состоять только из цифр. Введите заново:")
+        return
+    await state.update_data(target_id=int(message.text))
+    await state.set_state(BotStates.admin_private_msg)
+    await message.answer(f"Напишите текст сообщения для ID `{message.text}`:")
+
+@dp.message(BotStates.admin_private_msg)
+async def admin_private_msg_exec(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    target_id = data.get("target_id")
+    await state.clear()
+    try:
+        await bot.send_message(chat_id=target_id, text=f"💬 **Сообщение от администратора:**\n\n{message.text}")
+        await message.answer("✅ Отправлено успешно!", reply_markup=get_admin_keyboard())
+    except Exception as e:
+        await message.answer(f"❌ Не удалось отправить. Ошибка: {e}", reply_markup=get_admin_keyboard())
+
+@dp.message(F.text == "📁 Скачать базу users.txt")
+async def admin_download_db(message: types.Message):
+    if message.from_user.id != ADMIN_ID: return
+    if os.path.exists(USERS_FILE):
+        await message.answer_document(types.FSInputFile(USERS_FILE), caption="Актуальный бэкап пользователей")
+    else:
+        await message.answer("База пользователей еще не создана.")
+
 # ==============================================================================
-# 5. ХЕНДЛЕР ОБРАБОТКИ GEMINI ЧЕРЕЗ REVERSE PROXY WOKRERS
+# 6. ОБРАБОТКА ЗАПРОСОВ К GEMINI ЧЕРЕЗ CLOUDFLARE AI GATEWAY
 # ==============================================================================
 @dp.message(BotStates.ai_mode)
 async def handle_ai_request(message: types.Message):
     if not message.text: return
-    if message.text == "❌ Выйти из режима ИИ": return # Даем отработать верхнему хендлеру
+    if message.text == "❌ Выйти из режима ИИ": return 
     
     await bot.send_chat_action(chat_id=message.chat.id, action="typing")
     payload = {"contents": [{"parts": [{"text": message.text}]}]}
@@ -148,20 +214,20 @@ async def handle_ai_request(message: types.Message):
                     ai_text = data['candidates'][0]['content']['parts'][0]['text']
                     await message.answer(ai_text)
                 elif response.status == 429:
-                    await message.answer("⚠️ Выдано ограничение частоты запросов от Google (429). Подождите минуту.")
+                    await message.answer("⚠️ Превышен лимит запросов к Google Gemini (429). Подождите минуту.")
                 elif response.status in [401, 403]:
-                    await message.answer("⚠️ Ошибка авторизации. Проверьте правильность GEMINI_API_KEY в Render!")
+                    await message.answer("⚠️ Ошибка авторизации. Проверь правильность ключа GEMINI_API_KEY!")
                 else:
-                    await message.answer(f"⚠️ Шлюз вернул ошибку: {response.status}. Повторите запрос чуть позже.")
+                    await message.answer(f"⚠️ Ошибка прокси-шлюза. Код ответа сервера: {response.status}")
     except Exception as e:
-        print(f"Ошибка шлюза: {e}", file=sys.stderr)
-        await message.answer("⚠️ Не удалось получить ответ от ИИ. Попробуйте отправить сообщение еще раз.")
+        print(f"Ошибка шлюза Cloudflare: {e}", file=sys.stderr)
+        await message.answer("⚠️ Не удалось связаться с нейросетью. Попробуйте отправить сообщение еще раз.")
 
 # ==============================================================================
-# 6. ВЕБ-СЕРВЕР И ЗАПУСК
+# 7. ВЕБ-СЕРВЕР ДЛЯ ПОДДЕРЖАНИЯ СТАБИЛЬНОСТИ НА RENDER (PING)
 # ==============================================================================
 async def handle_render_ping(request):
-    return web.Response(text="Бот онлайн. Шлюз Gemini настроен через Reverse Proxy!", status=200)
+    return web.Response(text="Бот запущен и стабилен через Cloudflare Gateway!", status=200)
 
 async def main():
     app = web.Application()
