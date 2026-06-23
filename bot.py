@@ -33,15 +33,16 @@ MAP_FILE = "chats_map.json"
 
 class BotStates(StatesGroup):
     ai_mode = State()         
-    support_mode = State()     # НАЙДЕННОЕ РЕШЕНИЕ: Отдельный режим диалога с админом
+    support_mode = State()     
     admin_broadcast = State() 
     admin_init_chat_id = State()
     admin_init_chat_msg = State()
 
 OPENROUTER_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions"
 
-# Точный список запрашиваемых тобой моделей
+# ОБНОВЛЕННЫЙ СПИСОК (Добавлена модель openrouter/auto)
 MODELS_DATABASE = {
+    "openrouter/auto": "🤖 Автовыбор OpenRouter",
     "openrouter/owl-alpha": "🦉 Owl Alpha (Agentic)",
     "nvidia/nemotron-3-ultra-550b-a55b:free": "⚡ Nemotron 3 Ultra 550B",
     "google/gemma-4-31b-it:free": "🧠 Google Gemma 4 31B (Медиа)",
@@ -58,8 +59,9 @@ MODELS_DATABASE = {
     "nvidia/nemotron-3-nano-30b-a3b:free": "🔋 Nemotron 3 Nano 30B"
 }
 
-# Список моделей, которые ТОЧНО поддерживают зрение (Vision / передачу Base64 картинок)
+# Модели, умеющие обрабатывать файлы/картинки (Сюда же включен автовыбор)
 VISION_MODELS = [
+    "openrouter/auto",
     "google/gemma-4-31b-it:free", 
     "google/gemma-4-26b-a4b-it:free",
     "bytedance-seed/seedream-4.5"
@@ -193,7 +195,6 @@ async def exit_support_mode(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer("Вы вышли из режима связи с администратором.", reply_markup=get_main_keyboard(message.from_user.id))
 
-# Хендлер отправляет сообщения админу ТОЛЬКО если юзер вошел в состояние support_mode
 @dp.message(BotStates.support_mode)
 async def handle_user_chat_to_admin(message: types.Message):
     adm_id = get_admin_id()
@@ -320,7 +321,7 @@ async def admin_send_init_msg(message: types.Message, state: FSMContext):
 async def broadcast_start(message: types.Message, state: FSMContext):
     if not is_admin(message.from_user.id): return
     await state.set_state(BotStates.admin_broadcast)
-    await message.answer("Введите text рассылки (или /cancel):")
+    await message.answer("Введите текст рассылки (или /cancel):")
 
 @dp.message(BotStates.admin_broadcast)
 async def broadcast_exec(message: types.Message, state: FSMContext):
@@ -340,14 +341,14 @@ async def broadcast_exec(message: types.Message, state: FSMContext):
     await message.answer(f"📢 Выполнено!\nУспешно: `{s}`\nОшибок: `{f}`", reply_markup=get_admin_keyboard(), parse_mode="Markdown")
 
 # ==============================================================================
-# 6. ОБРАБОТЧИК ИИ С ВАЛИДАЦИЕЙ МУЛЬТИМЕДИА
+# 6. ОБРАБОТЧИК ИИ С ИСПРАВЛЕННЫМ ДИНАМИЧЕСКИМ СТРУКТУРИРОВАНИЕМ PAYLOAD
 # ==============================================================================
 @dp.message(Command("ai"))
 @dp.message(F.text == "🤖 Общение с ИИ")
 async def start_ai(message: types.Message, state: FSMContext):
     await state.set_state(BotStates.ai_mode)
     data = await state.get_data()
-    model = data.get("current_model", "openrouter/owl-alpha")
+    model = data.get("current_model", "openrouter/auto")
     await message.answer(f"🤖 Режим ИИ запущен!\nПрисылайте запросы.", reply_markup=get_ai_keyboard())
 
 @dp.message(BotStates.ai_mode, F.text == "⚙️ Выбрать нейросеть")
@@ -362,7 +363,7 @@ async def select_ai_menu(message: types.Message):
 @dp.callback_query(F.data.startswith("ai_"))
 async def save_ai_selection(callback: types.CallbackQuery, state: FSMContext):
     short = callback.data.split("_")[1]
-    full = "openrouter/owl-alpha"
+    full = "openrouter/auto"
     for m_id in MODELS_DATABASE.keys():
         if short in m_id:
             full = m_id
@@ -381,13 +382,12 @@ async def ai_multimedia_handler(message: types.Message, state: FSMContext):
     if message.text in ["❌ Выйти из режима ИИ", "⚙️ Выбрать нейросеть"]: return
 
     user_data = await state.get_data()
-    chosen_model = user_data.get("current_model", "openrouter/owl-alpha")
+    chosen_model = user_data.get("current_model", "openrouter/auto")
     
     has_media = bool(message.photo or message.video or message.video_note)
     
-    # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Если модель чисто текстовая, блокируем отправку файлов до запроса к OpenRouter
     if has_media and chosen_model not in VISION_MODELS:
-        await message.answer("⚠️ Выбранная нейросеть поддерживает **только текст**. Пожалуйста, отправьте текстовый запрос или переключитесь на мультимедийную модель (например, *Google Gemma* или *ByteDance Seedream* через меню настроек).", parse_mode="Markdown")
+        await message.answer("⚠️ Выбранная нейросеть поддерживает **только текст**. Пожалуйста, отправьте текстовый запрос или переключитесь на мультимедийную модель (например, *Автовыбор* или *Google Gemma*).", parse_mode="Markdown")
         return
 
     await bot.send_chat_action(chat_id=message.chat.id, action="typing")
@@ -418,16 +418,19 @@ async def ai_multimedia_handler(message: types.Message, state: FSMContext):
         await status_msg.edit_text("🎙 *Слушаю голосовое сообщение...* 💬", parse_mode="Markdown")
         prompt_text = f"[Голосовое сообщение]: Ответь пользователю на его аудио-запрос."
 
-    content_payload = [{"type": "text", "text": prompt_text}]
-    if base64_image:
-        content_payload.append({
-            "type": "image_url",
-            "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}
-        })
+    # ИСПРАВЛЕНИЕ: Если медиафайлов нет, контент передается СТРОКОЙ. Так любая текстовая модель воспримет запрос корректно.
+    if not base64_image:
+        final_content = prompt_text
+    else:
+        # Если есть фото/видео — переключаем формат на мультимодальный список объектов
+        final_content = [
+            {"type": "text", "text": prompt_text},
+            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
+        ]
 
     payload = {
         "model": chosen_model, 
-        "messages": [{"role": "user", "content": content_payload}],
+        "messages": [{"role": "user", "content": final_content}],
         "stream": True  
     }
     headers = {"Authorization": f"Bearer {OPENROUTER_KEY}", "Content-Type": "application/json"}
