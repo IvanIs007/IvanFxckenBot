@@ -14,7 +14,7 @@ from aiohttp import web, ClientSession
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
 PORT = int(os.environ.get("PORT", 10000))
-ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))  # Твой Telegram ID (для админки)
+ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))  # Твой Telegram ID для админки
 
 if not BOT_TOKEN or not GEMINI_KEY:
     print("КРИТИЧЕСКАЯ ОШИБКА: Проверь TELEGRAM_BOT_TOKEN и GEMINI_API_KEY в Render!")
@@ -33,11 +33,10 @@ class BotStates(StatesGroup):
     admin_private_msg = State() 
 
 # ==============================================================================
-# НАСТРОЙКА ССЫЛКИ CLOUDFLARE AI GATEWAY
+# НАСТРОЙКА ССЫЛКИ CLOUDFLARE AI GATEWAY (ПОД ФОРМАТ COMPAT)
 # ==============================================================================
-# Ссылка сделана чистой, без ключа "?key=" на конце. 
-# Теперь ключ передается в заголовках, чтобы формат AQ... не вызывал ошибок!
-GEMINI_PROXY_URL = "https://gateway.ai.cloudflare.com/v1/42b17838faa1c270c8974a82d80aba1b/my-gemini-bot/gemini/v1/models/gemini-2.5-flash:generateContent"
+# Используем ровно ту ссылку, которую сгенерировал Cloudflare. Ключ в неё зашивать не нужно!
+GEMINI_PROXY_URL = "https://gateway.ai.cloudflare.com/v1/42b17838faa1c270c8974a82d80aba1b/my-gemini-bot/compat/chat/completions"
 
 # ==============================================================================
 # 2. РАБОТА С БАЗОЙ ДАННЫХ (ФАЙЛ)
@@ -192,7 +191,7 @@ async def admin_download_db(message: types.Message):
         await message.answer("База пользователей еще не создана.")
 
 # ==============================================================================
-# 6. ОБРАБОТКА ЗАПРОСОВ К GEMINI (БЕЗОПАСНАЯ АВТОРИЗАЦИЯ)
+# 6. ОБРАБОТКА ЗАПРОСОВ К GEMINI (ЧЕРЕЗ COMPAT СОВМЕСТИМОСТЬ CLOUDFLARE)
 # ==============================================================================
 @dp.message(BotStates.ai_mode)
 async def handle_ai_request(message: types.Message):
@@ -201,20 +200,18 @@ async def handle_ai_request(message: types.Message):
     
     await bot.send_chat_action(chat_id=message.chat.id, action="typing")
     
+    # Формат тела запроса под OpenAI-совместимый эндпоинт Cloudflare Gateway
     payload = {
-        "contents": [
-            {
-                "parts": [
-                    {"text": message.text}
-                ]
-            }
+        "model": "gemini-2.5-flash",
+        "messages": [
+            {"role": "user", "content": message.text}
         ]
     }
     
-    # Передаем ваш ключ через специальный заголовок, чтобы прокси не ломало строку
+    # Передаем ваш ключ AQ... как Bearer токен в заголовке Authorization
     headers = {
         "Content-Type": "application/json",
-        "x-goog-api-key": GEMINI_KEY
+        "Authorization": f"Bearer {GEMINI_KEY}"
     }
 
     try:
@@ -222,14 +219,15 @@ async def handle_ai_request(message: types.Message):
             async with session.post(GEMINI_PROXY_URL, json=payload, headers=headers, timeout=30) as response:
                 if response.status == 200:
                     data = await response.json()
-                    ai_text = data['candidates'][0]['content']['parts'][0]['text']
+                    # Извлекаем текст ответа по стандартам OpenAI Chat Completions
+                    ai_text = data['choices'][0]['message']['content']
                     await message.answer(ai_text)
                 elif response.status in [401, 403]:
-                    await message.answer("⚠️ Ошибка авторизации. Проверь правильность сохраненного ключа AQ... в настройках Render!")
+                    await message.answer("⚠️ Ошибка авторизации. Проверь правильность токена GEMINI_API_KEY в Render. Он должен начинаться на AQ...")
                 elif response.status == 429:
-                    await message.answer("⚠️ Превышен лимит запросов к Google Gemini (429). Подождите минуту.")
+                    await message.answer("⚠️ Превышен лимит запросов (429). Подождите минуту.")
                 else:
-                    await message.answer(f"⚠️ Ошибка прокси-шлюза. Код ответа сервера: {response.status}")
+                    await message.answer(f"⚠️ Ошибка шлюза. Код ответа сервера Cloudflare: {response.status}")
     except Exception as e:
         print(f"Ошибка шлюза Cloudflare: {e}", file=sys.stderr)
         await message.answer("⚠️ Не удалось связаться с нейросетью. Попробуйте отправить сообщение еще раз.")
@@ -238,7 +236,7 @@ async def handle_ai_request(message: types.Message):
 # 7. ВЕБ-СЕРВЕР ДЛЯ ПОДДЕРЖАНИЯ СТАБИЛЬНОСТИ НА RENDER (PING)
 # ==============================================================================
 async def handle_render_ping(request):
-    return web.Response(text="Бот запущен и стабилен через Cloudflare Gateway!", status=200)
+    return web.Response(text="Бот запущен и стабилен через Cloudflare Gateway COMPAT эндпоинт!", status=200)
 
 async def main():
     app = web.Application()
