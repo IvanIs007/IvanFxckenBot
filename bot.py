@@ -116,7 +116,9 @@ async def ask_free_ai(user_id: int, prompt: str) -> str:
                 return f"⚠️ Ошибка API ({resp.status})"
     except Exception as e:
         logger.error(f"ИИ Ошибка: {e}")
-        return "⚠️ Ошибка связи с нейросетью."               
+        return "⚠️ Ошибка связи с нейросетью."      
+
+        
                 
         # Системный промпт зашиваем прямо перед отправкой, чтобы модель знала роль
         system_instruction = "Ты крутой ИИ-ассистент IvanFuckenBot. Отвечай кратко, используй молодежный сленг, пиши только на русском и по делу."
@@ -198,6 +200,52 @@ async def grok_stop_callback(callback: CallbackQuery):
 async def grok_admin_callback(callback: CallbackQuery):
     await callback.answer()
     await callback.message.answer("🤖 Чтобы спросить нейросеть, используй команду:\n<code>/grok твой вопрос</code>", parse_mode="HTML")
+
+# Используем семафор, чтобы бот делал не более 1 запроса к API одновременно
+api_limiter = asyncio.Semaphore(1)
+
+async def ask_ai(prompt: str) -> str:
+    if not GEMINI_API_KEY: return "⚠️ Ключ не задан."
+    
+    async with api_limiter:
+        try:
+            # Делаем небольшую паузу перед запросом, чтобы не спамить
+            await asyncio.sleep(2) 
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+            payload = {"contents": [{"parts": [{"text": prompt}]}]}
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, json=payload, timeout=20) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        return data['candidates'][0]['content']['parts'][0]['text'].strip()
+                    elif response.status == 429:
+                        return "⚠️ Нейросеть занята (лимит запросов). Подожди 10-20 секунд и попробуй снова."
+                    else:
+                        return f"⚠️ Ошибка API ({response.status})."
+        except Exception as e:
+            return "⚠️ Ошибка связи."
+
+@dp.message(CommandStart())
+async def start_cmd(message: Message):
+    await message.answer("👋 Привет! Пиши вопрос — отвечу.")
+
+@dp.message(F.text)
+async def chat_handler(message: Message):
+    # Если бот уже "думает", не даем пользователю спамить новые запросы
+    msg = await message.answer("🔄 Нейросеть думает (подожди пару секунд)...")
+    reply = await ask_ai(message.text)
+    await msg.edit_text(reply)
+
+class HealthCheck(BaseHTTPRequestHandler):
+    def do_GET(s): s.send_response(200); s.end_headers(); s.wfile.write(b"OK")
+    def log_message(self, format, *args): pass
+
+def run_server(): HTTPServer(("", PORT), HealthCheck).serve_forever()
+
+if __name__ == "__main__":
+    threading.Thread(target=run_server, daemon=True).start()
+    asyncio.run(dp.start_polling(bot))
 
 # --- ОСТАЛЬНАЯ ЛОГИКА БОТА ---
 @dp.message(Command("panel"), F.from_user.id == ADMIN_ID)
