@@ -2,7 +2,6 @@ import asyncio
 import logging
 import os
 import threading
-import json
 import urllib.request
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -70,7 +69,7 @@ async def set_bot_commands():
         BotCommand(command="tracks_control", description="🎵 Управление треками"),
         BotCommand(command="broadcast", description="📢 Сделать рассылку"),
         BotCommand(command="chats", description="📝 Недавние диалоги"),
-        BotCommand(command="grok", description="🤖 Быстрый вопрос к ИИ"),
+        BotCommand(command="grok", description="🤖 Быстрый вопрос к бесплатной нейросети"),
         BotCommand(command="dice", description="🎲 Кинуть кость")
     ]
     await bot.set_my_commands(user_commands, scope=BotCommandScopeDefault())
@@ -95,15 +94,13 @@ async def start_cmd(message: Message):
             reply_markup=get_user_kb()
         )
 
-
-# --- ПОЛНОСТЬЮ БЕСПЛАТНЫЙ ИИ БЕЗ КЛЮЧЕЙ (Стабильный шлюз) ---
+# --- БЕСПЛАТНЫЙ ИИ ЧЕРЕЗ АГРЕГАТОР POLLINATIONS (БЕЗ КЛЮЧЕЙ) ---
 async def ask_free_ai(prompt: str) -> str:
     try:
-        # Запасной супер-стабильный шлюз через встроенный urllib
         def _fetch():
             encoded_prompt = urllib.parse.quote(prompt)
-            # Задаем системную инструкцию прямо в URL для простоты
-            system_prompt = urllib.parse.quote("Ты — крутой ИИ-ассистент в боте IvanFuckenBot. Отвечай кратко, современно и по делу.")
+            # Промпт-инструкция для модели
+            system_prompt = urllib.parse.quote("Ты — крутой ИИ-ассистент в боте IvanFuckenBot. Отвечай кратко, современно, используй сленг и пиши строго по делу.")
             url = f"https://text.pollinations.ai/{encoded_prompt}?system={system_prompt}"
             
             req = urllib.request.Request(
@@ -113,24 +110,15 @@ async def ask_free_ai(prompt: str) -> str:
             with urllib.request.urlopen(req, timeout=15) as response:
                 return response.read().decode('utf-8')
 
-        # Запускаем в потоке, чтобы бот не зависал во время ответа
+        # Выполняем синхронный urllib запрос в отдельном потоке, чтобы бот не фризился
         reply = await asyncio.to_thread(_fetch)
         if reply.strip():
             return reply
-        return "⚠️ Не удалось получить вменяемый ответ. Попробуй еще раз!"
+        return "⚠️ Не удалось получить ответ от ИИ. Попробуй еще раз!"
         
     except Exception as e:
-        logger.error(f"AI Error: {e}")
-        return "⚠️ Не удалось подключиться к серверам ИИ. Попробуй через минутку!"
-
-        # Запасной ультра-быстрый вариант, если первый шлюз перегружен
-        try:
-            async with httpcore.AsyncClient() as client:
-                # Чат-ассистент без ограничений
-                resp = await client.request(b"GET", f"https://text.pollinations.ai/{prompt}?system=Ты+бот+IvanFuckenBot+отвечай+кратко".encode('utf-8'))
-                return resp.content.decode('utf-8')
-        except:
-            return "⚠️ Не удалось подключиться к серверам ИИ. Попробуй через минутку!"
+        logger.error(f"Ошибка бесплатного ИИ: {e}")
+        return "⚠️ Не удалось подключиться к серверам нейросети. Попробуй через минутку!"
 
 # --- КОМАНДЫ И CALLBACK ДЛЯ ИИ ---
 @dp.message(Command("grok"))
@@ -145,7 +133,7 @@ async def grok_command(message: Message, state: FSMContext):
         await msg.edit_text(reply)
     else:
         ai_mode_users.add(message.from_user.id)
-        await message.answer("🤖 <b>Режим общения с нейросетью активирован!</b>\n\nПиши мне любые вопросы.", parse_mode="HTML", reply_markup=get_exit_ai_kb())
+        await message.answer("🤖 <b>Режим общения с нейросетью активирован!</b>\n\nПиши мне любые вопросы, отвечу бесплатно.", parse_mode="HTML", reply_markup=get_exit_ai_kb())
 
 @dp.callback_query(F.data == "grok_start")
 async def grok_start_callback(callback: CallbackQuery):
@@ -158,7 +146,7 @@ async def grok_stop_callback(callback: CallbackQuery):
     await callback.answer()
     if callback.from_user.id in ai_mode_users:
         ai_mode_users.remove(callback.from_user.id)
-    await callback.message.answer("❌ Режим ИИ выключен.", reply_markup=get_user_kb())
+    await callback.message.answer("❌ Режим ИИ выключен. Теперь твои сообщения снова отправляются админу.", reply_markup=get_user_kb())
 
 @dp.callback_query(F.data == "grok_admin")
 async def grok_admin_callback(callback: CallbackQuery):
@@ -168,27 +156,27 @@ async def grok_admin_callback(callback: CallbackQuery):
 # --- ОСТАЛЬНАЯ ЛОГИКА БОТА ---
 @dp.message(Command("panel"), F.from_user.id == ADMIN_ID)
 async def panel_cmd(message: Message):
-    await message.answer("⚙️ Панель управления:", reply_markup=get_admin_kb())
+    await message.answer("⚙️ Панель управления IvanFuckenBot:", reply_markup=get_admin_kb())
 
 @dp.message(Command("tracks_control"), F.from_user.id == ADMIN_ID)
 async def tracks_control_cmd(message: Message):
-    await message.answer(f"🎵 Управление треками", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+    await message.answer(f"🎵 <b>Управление треками</b>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="➕ Добавить трек", callback_data="add_track")],
         [InlineKeyboardButton(text="🗑 Очистить список", callback_data="clear_tracks")]
     ]))
 
 @dp.message(Command("broadcast"), F.from_user.id == ADMIN_ID)
 async def broadcast_cmd(message: Message, state: FSMContext):
-    await message.answer("📢 Отправь сообщение для рассылки:")
+    await message.answer("📢 Отправь мне сообщение для рассылки ВСЕМ юзерам:")
     await state.set_state(AdminStates.waiting_for_broadcast)
 
 @dp.message(Command("chats"), F.from_user.id == ADMIN_ID)
 async def chats_cmd(message: Message):
     if not recent_chats:
-        await message.answer("Список пуст!")
+        await message.answer("Список недавних диалогов пока пуст!")
         return
     kb_buttons = [[InlineKeyboardButton(text=f"👤 {name}", callback_data=f"chat_with:{uid}")] for uid, name in recent_chats.items()]
-    await message.answer("📝 Выбери пользователя:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_buttons))
+    await message.answer("📝 <b>Выбери пользователя:</b>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_buttons))
 
 @dp.message(Command("tracks"))
 async def user_tracks_cmd(message: Message):
@@ -196,7 +184,7 @@ async def user_tracks_cmd(message: Message):
         await message.answer("Пока нет доступных треков!")
         return
     kb_list = [[InlineKeyboardButton(text=f"🎵 {t['name']}", callback_data=f"play:{i}")] for i, t in enumerate(tracks_db)]
-    await message.answer("🔥 Выбирай любой трек:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_list))
+    await message.answer("🔥 <b>Выбирай любой трек:</b>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_list))
 
 @dp.message(Command("dice"))
 async def user_dice_cmd(message: Message):
@@ -206,8 +194,8 @@ async def user_dice_cmd(message: Message):
     bot_dice = await bot.send_dice(chat_id=chat_id, emoji="🎲")
     await asyncio.sleep(4)
     u, b = user_dice.dice.value, bot_dice.dice.value
-    result = "Ты выиграл! 🎉" if u > b else ("ТЫ ПРОИГРАЛ! 🤭" if u < b else "Ничья! 🤔")
-    await bot.send_message(chat_id=chat_id, text=f"Твой результат: {u} 🎰 Мой: {b}\n\n{result}")
+    result = "Ты выиграл! 😳" if u > b else ("ТЫ ПРОИГРАЛ! 🤭" if u < b else "Ничья! 🤔")
+    await bot.send_message(chat_id=chat_id, text=f"Твой результат: {u} 🎰 Мой результат: {b}\n\n{result}")
 
 @dp.callback_query(F.data == "list_tracks")
 async def list_tracks_callback(callback: CallbackQuery):
@@ -237,13 +225,13 @@ async def show_recent_cb(callback: CallbackQuery):
 @dp.callback_query(F.data == "add_track")
 async def add_track_start(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
-    await callback.message.answer("Пришли mp3-файл:")
+    await callback.message.answer("Пришли mp3-файл трека:")
     await state.set_state(AdminStates.waiting_for_track_file)
 
 @dp.message(AdminStates.waiting_for_track_file, F.audio)
 async def get_track_file(message: Message, state: FSMContext):
     await state.update_data(file_id=message.audio.file_id)
-    await message.answer("Введи название трека:")
+    await message.answer("Напиши его название:")
     await state.set_state(AdminStates.waiting_for_track_name)
 
 @dp.message(AdminStates.waiting_for_track_name, F.text)
@@ -284,13 +272,13 @@ async def start_chat_with(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     uid = int(callback.data.split(":")[1])
     await state.update_data(target_uid=uid)
-    await callback.message.answer(f"🗣 Пиши сообщение пользователю {uid}:")
+    await callback.message.answer(f"🗣 Режим прямой отправки пользователю {uid}. Отправь сообщение:")
     await state.set_state(AdminStates.waiting_for_direct_msg)
 
 @dp.callback_query(F.data == "direct_send_start")
 async def direct_start(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
-    await callback.message.answer("👤 Введи Telegram ID:")
+    await callback.message.answer("👤 Введи цифровой Telegram ID:")
     await state.set_state(AdminStates.waiting_for_direct_uid)
 
 @dp.message(AdminStates.waiting_for_direct_uid)
@@ -298,7 +286,7 @@ async def get_uid(message: Message, state: FSMContext):
     if not message.text.isdigit(): return
     uid = int(message.text)
     await state.update_data(target_uid=uid)
-    await message.answer(f"Отправь сообщение для {uid}:")
+    await message.answer(f"ID принят! Отправь сообщение для {uid}:")
     await state.set_state(AdminStates.waiting_for_direct_msg)
 
 @dp.message(AdminStates.waiting_for_direct_msg)
@@ -350,4 +338,3 @@ def run_server():
 if __name__ == "__main__":
     threading.Thread(target=run_server, daemon=True).start()
     asyncio.run(dp.start_polling(bot))
-
