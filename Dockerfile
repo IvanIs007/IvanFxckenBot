@@ -17,4 +17,4 @@ COPY . .
 EXPOSE 10000
 
 # Команда для запуска бота (замени main.py на имя своего файла, если оно другое)
-CMD ["python", "main.py"]
+CMD ["python", "bot.py"]
