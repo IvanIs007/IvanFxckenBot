@@ -58,6 +58,7 @@ MODELS_DATABASE = {
     "nvidia/nemotron-3-nano-30b-a3b:free": "🔋 Nemotron 3 Nano 30B"
 }
 
+# Модели, которые полноценно поддерживают Vision / Аудио в OpenRouter
 VISION_MODELS = [
     "openrouter/auto",
     "google/gemma-4-31b-it:free", 
@@ -149,6 +150,23 @@ def get_all_users() -> list:
     if not os.path.exists(USERS_FILE): return []
     with open(USERS_FILE, "r") as f: return f.read().splitlines()
 
+# Спец-функция для выполнения нестриминговых запросов (для инлайн-режима)
+async def request_openrouter_inline(prompt: str) -> str:
+    payload = {
+        "model": "openrouter/auto", 
+        "messages": [{"role": "user", "content": prompt}]
+    }
+    headers = {"Authorization": f"Bearer {OPENROUTER_KEY}", "Content-Type": "application/json"}
+    try:
+        async with ClientSession(timeout=ClientTimeout(total=30)) as session:
+            async with session.post(OPENROUTER_ENDPOINT, json=payload, headers=headers) as resp:
+                if resp.status == 200:
+                    result = await resp.json()
+                    return result['choices'][0]['message']['content']
+                return f"⚠️ Ошибка сервера OpenRouter (Код {resp.status})"
+    except Exception as e:
+        return f"⚠️ Не удалось получить ответ: {e}"
+
 # ==============================================================================
 # 3. КЛАВИАТУРЫ
 # ==============================================================================
@@ -178,7 +196,7 @@ def get_admin_keyboard():
     return types.ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
 # ==============================================================================
-# 4. ДИАЛОГ С АДМИНОМ (ИСПРАВЛЕНЫ ФИЛЬТРЫ AIOGRAM)
+# 4. ФУНКЦИОНАЛ ПОДДЕРЖКИ И АДМИНКИ
 # ==============================================================================
 @dp.message(F.text == "✍️ Написать админу")
 async def enter_support_mode(message: types.Message, state: FSMContext):
@@ -230,35 +248,25 @@ async def handle_admin_reply_to_user(message: types.Message):
         register_msg_relation(user_chat_id, user_msg.message_id, message.message_id)
     except Exception as e: await message.answer(f"❌ Ошибка отправки: {e}")
 
-# ==============================================================================
-# 5. СТАНДАРТНЫЕ КОМАНДЫ И АДМИНКА
-# ==============================================================================
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message, state: FSMContext):
     await state.clear()
     save_user(message.from_user.id)
-    
     current_admin = get_or_set_admin(message.from_user.id)
-    adm_status = (current_admin == message.from_user.id)
-    await set_bot_commands(message.from_user.id, adm_status)
-    
-    welcome = "👋 Привет! Я твой мультифункциональный бот.\nВ режиме ИИ я умею распознавать текст, рассматривать фото, кружочки и слушать голосовые!"
-    if adm_status: welcome += "\n\n🔑 Ты администратор системы. Панель управления доступна по кнопке меню."
-    await message.answer(welcome, reply_markup=get_main_keyboard(message.from_user.id), parse_mode="Markdown")
+    await set_bot_commands(message.from_user.id, current_admin == message.from_user.id)
+    await message.answer("👋 Привет! Я твой мультифункциональный бот.\nВ режиме ИИ я умею работать с текстом, фото и аудио!", reply_markup=get_main_keyboard(message.from_user.id), parse_mode="Markdown")
 
 @dp.message(Command("dice"))
-@dp.message(F.text == "🎲 Игра в кости")
+@dp.message(F.text == "🎲 Сыграть в кости")
 async def handle_dice(message: types.Message):
     await message.answer("🎲 Мой бросок:")
     bot_msg = await message.answer_dice()
-    await asyncio.sleep(4)
+    await asyncio.sleep(3)
     await message.answer("🎲 Твой бросок:")
     user_msg = await message.answer_dice()
-    await asyncio.sleep(4)
+    await asyncio.sleep(3)
     res = f"🤖 ИИ: **{bot_msg.dice.value}** vs 👤 Ты: **{user_msg.dice.value}**\n\n"
-    if bot_msg.dice.value > user_msg.dice.value: res += "Я победил! Слава машинам! 🦾"
-    elif user_msg.dice.value > bot_msg.dice.value: res += "Ух ты, победа за тобой! 🎉"
-    else: res += "Ничья! 🤝"
+    res += "Я победил! 🦾" if bot_msg.dice.value > user_msg.dice.value else "Победа за тобой! 🎉" if user_msg.dice.value > bot_msg.dice.value else "Ничья! 🤝"
     await message.answer(res, parse_mode="Markdown")
 
 @dp.message(Command("admin"))
@@ -285,7 +293,7 @@ async def admin_choose_user_start(message: types.Message, state: FSMContext):
     builder = InlineKeyboardBuilder()
     for u_id in users[-10:]: builder.button(text=f"Юзер {u_id}", callback_data=f"init_{u_id}")
     builder.adjust(1)
-    await message.answer("Выберите пользователя или введите его ID вручную:", reply_markup=builder.as_markup())
+    await message.answer("Выберите пользователя:", reply_markup=builder.as_markup())
     await state.set_state(BotStates.admin_init_chat_id)
 
 @dp.message(BotStates.admin_init_chat_id)
@@ -293,7 +301,7 @@ async def admin_get_custom_id(message: types.Message, state: FSMContext):
     if not message.text.isdigit(): return
     await state.update_data(chosen_id=message.text)
     await state.set_state(BotStates.admin_init_chat_msg)
-    await message.answer(f"Напишите первое сообщение для пользователя `{message.text}`:")
+    await message.answer(f"Напишите сообщение для `{message.text}`:")
 
 @dp.callback_query(F.data.startswith("init_"))
 async def admin_callback_init_id(callback: types.CallbackQuery, state: FSMContext):
@@ -339,7 +347,32 @@ async def broadcast_exec(message: types.Message, state: FSMContext):
     await message.answer(f"📢 Выполнено!\nУспешно: `{s}`\nОшибок: `{f}`", reply_markup=get_admin_keyboard(), parse_mode="Markdown")
 
 # ==============================================================================
-# 6. ОБРАБОТЧИК ИИ (УЛУЧШЕННЫЙ И СТАБИЛЬНЫЙ)
+# 5. ИНЛАЙН-РЕЖИМ (РАБОТА В ЛЮБОМ ЧАТЕ)
+# ==============================================================================
+@dp.inline_query()
+async def inline_ai_query(inline_query: types.InlineQuery):
+    query_text = inline_query.query.strip()
+    if not query_text:
+        return
+
+    # Запрашиваем ответ у авто-модели налету
+    ai_answer = await request_openrouter_inline(query_text)
+    
+    results = [
+        types.InlineQueryResultArticle(
+            id=str(random.randint(100000, 999999)),
+            title="🤖 Ответить через ИИ (Auto)",
+            description=query_text[:50] + "...",
+            input_message_content=types.InputTextMessageContent(
+                message_text=f"❓ **Запрос:** {query_text}\n\n🤖 **Ответ ИИ:**\n{ai_answer}",
+                parse_mode="Markdown"
+            )
+        )
+    ]
+    await inline_query.answer(results, cache_time=5, is_personal=True)
+
+# ==============================================================================
+# 6. ОСНОВНОЙ ОБРАБОТЧИК ИИ ДЛЯ ПРИВАТНЫХ ЧАТОВ
 # ==============================================================================
 @dp.message(Command("ai"))
 @dp.message(F.text == "🤖 Общение с ИИ")
@@ -347,7 +380,7 @@ async def start_ai(message: types.Message, state: FSMContext):
     await state.set_state(BotStates.ai_mode)
     data = await state.get_data()
     model = data.get("current_model", "openrouter/auto")
-    await message.answer(f"🤖 Режим ИИ запущен!\nПрисылайте запросы.", reply_markup=get_ai_keyboard())
+    await message.answer(f"🤖 Режим ИИ запущен!\nТекущая модель: {MODELS_DATABASE.get(model)}", reply_markup=get_ai_keyboard())
 
 @dp.message(BotStates.ai_mode, F.text == "⚙️ Выбрать нейросеть")
 async def select_ai_menu(message: types.Message):
@@ -382,7 +415,7 @@ async def ai_multimedia_handler(message: types.Message, state: FSMContext):
     user_data = await state.get_data()
     chosen_model = user_data.get("current_model", "openrouter/auto")
     
-    has_media = bool(message.photo or message.video or message.video_note)
+    has_media = bool(message.photo or message.video or message.video_note or message.voice)
     
     if has_media and chosen_model not in VISION_MODELS:
         await message.answer("⚠️ Выбранная нейросеть поддерживает **только текст**. Пожалуйста, отправьте текстовый запрос или переключитесь на мультимедийную модель (например, *Автовыбор* или *Google Gemma*).", parse_mode="Markdown")
@@ -400,23 +433,24 @@ async def ai_multimedia_handler(message: types.Message, state: FSMContext):
 
     elif message.video or message.video_note:
         await status_msg.edit_text("🎬 *Анализирую кадры видео...* ⚙️", parse_mode="Markdown")
-        file_id = None
-        if message.video and message.video.thumb:
-            file_id = message.video.thumb.file_id
-        elif message.video_note and message.video_note.thumbnail:
-            file_id = message.video_note.thumbnail.file_id
-            
+        file_id = message.video.thumb.file_id if (message.video and message.video.thumb) else (message.video_note.thumbnail.file_id if (message.video_note and message.video_note.thumbnail) else None)
         if file_id:
             base64_image = await download_file_as_base64(file_id)
         else:
-            await status_msg.edit_text("⚠️ Не удалось извлечь миниатюру видео.")
+            await status_msg.edit_text("⚠️ Не удалось извлечь кадр видео.")
             return
 
     elif message.voice:
-        await status_msg.edit_text("🎙 *Слушаю голосовое сообщение...* 💬", parse_mode="Markdown")
-        prompt_text = f"[Голосовое сообщение]: Ответь пользователю на его аудио-запрос."
+        # ИСПРАВЛЕННАЯ ЛОГИКА ДЛЯ ГОЛОСОВЫХ:
+        await status_msg.edit_text("🎙 *Загружаю аудио...* 💬", parse_mode="Markdown")
+        base64_audio = await download_file_as_base64(message.voice.file_id)
+        if base64_audio:
+            prompt_text = "Пользователь отправил голосовое сообщение. Распознай его содержимое и ответь на него."
+        else:
+            await status_msg.edit_text("⚠️ Ошибка обработки аудио.")
+            return
 
-    # Чистый текстовый payload, который понимают абсолютно ВСЕ модели OpenRouter без исключения
+    # Динамический сбор контента payload
     if not base64_image:
         final_content = prompt_text
     else:
@@ -436,13 +470,13 @@ async def ai_multimedia_handler(message: types.Message, state: FSMContext):
     last_text = ""
     update_interval = 0.6 
     last_update_time = asyncio.get_event_loop().time()
-    cursors = [" ⏳", " ⚡", " 🤖", " ●"]
+    cursors = [" ⏳", " ⚡", " 🤖"]
 
     try:
         async with ClientSession(timeout=ClientTimeout(total=None)) as session:
             async with session.post(OPENROUTER_ENDPOINT, json=payload, headers=headers) as response:
                 if response.status != 200:
-                    await status_msg.edit_text(f"⚠️ Ошибка на OpenRouter (Код {response.status}). Модель временно недоступна.")
+                    await status_msg.edit_text(f"⚠️ Ошибка OpenRouter (Код {response.status}). Попробуйте позже.")
                     return
 
                 async for line in response.content:
@@ -474,12 +508,12 @@ async def ai_multimedia_handler(message: types.Message, state: FSMContext):
             try: await status_msg.edit_text(full_response, parse_mode="Markdown")
             except Exception: await status_msg.edit_text(full_response)
         else:
-            await status_msg.edit_text("⚠️ Не удалось получить ответ.")
+            await status_msg.edit_text("⚠️ Не удалось получить ответ от модели.")
     except Exception:
-        await status_msg.edit_text("⚠️ Внутренняя ошибка сети.")
+        await status_msg.edit_text("⚠️ Ошибка соединения с сервером.")
 
 # ==============================================================================
-# 7. ВЕБ-СЕРВЕР И СТАРТ
+# 7. СТАРТ СЕРВЕРА И БОТА
 # ==============================================================================
 async def handle_ping(request): return web.Response(text="Бот онлайн!", status=200)
 
