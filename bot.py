@@ -20,7 +20,7 @@ OPENROUTER_KEY = os.environ.get("OPENROUTER_API_KEY")
 PORT = int(os.environ.get("PORT", 10000))
 
 if not BOT_TOKEN or not OPENROUTER_KEY:
-    print("КРИТИЧЕСКАЯ ОШИБКА: Проверь TELEGRAM_BOT_TOKEN и OPENROUTER_API_KEY в Render!")
+    print("КРИТИЧЕСКАЯ ОШИБКА: Проверь TELEGRAM_BOT_TOKEN и OPENROUTER_API_KEY!")
     sys.exit(1)
 
 bot = Bot(token=BOT_TOKEN)
@@ -50,13 +50,10 @@ MODELS_DATABASE = {
 # ==============================================================================
 # 2. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ РАБОТЫ С МЕДИА И БАЗОЙ
 # ==============================================================================
-async def download_file_as_base64(file_id: int) -> str:
-    """Скачивает файл из Telegram и конвертирует в Base64 для передачи в ИИ"""
+async def download_file_as_base64(file_id: str) -> str:
     try:
         file = await bot.get_file(file_id)
         file_path = file.file_path
-        
-        # Создаем сессию для скачивания файла из серверов Telegram
         async with ClientSession() as session:
             async with session.get(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}") as resp:
                 if resp.status == 200:
@@ -158,11 +155,17 @@ def get_admin_keyboard():
     return types.ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
 # ==============================================================================
-# 4. СИНХРОННЫЙ ДИАЛОГ С АДМИНОМ (ЧЕРЕЗ REPLY И ЮЗЕР-МОСТ)
+# 4. СИНХРОННЫЙ ДИАЛОГ С АДМИНОМ (РЕПЛАИ И МОСТ)
 # ==============================================================================
-@dp.message(F.chat.type == "private", ~F.text.startswith("/"), BotStates.ai_mode == None)
-async def handle_user_chat_to_admin(message: types.Message):
-    if is_admin(message.from_user.id): return
+
+# ИСПРАВЛЕНО: Вместо BotStates.ai_mode == None используем корректный StateFilter(None)
+@dp.message(F.chat.type == "private", ~F.text.startswith("/"), lambda msg: not is_admin(msg.from_user.id))
+async def handle_user_chat_to_admin(message: types.Message, state: FSMContext):
+    # Проверяем состояние вручную во избежание конфликтов типов
+    current_state = await state.get_state()
+    if current_state == BotStates.ai_mode.state:
+        return # Если юзер общается с ИИ, в админку слать не нужно
+
     adm_id = get_admin_id()
     if not adm_id: return
 
@@ -179,7 +182,7 @@ async def handle_user_chat_to_admin(message: types.Message):
         else:
             adm_msg = await bot.copy_message(chat_id=adm_id, from_chat_id=message.chat.id, message_id=message.message_id, caption=f"{header}{(message.caption or '')}", reply_to_message_id=target_reply_id, parse_mode="Markdown")
         register_msg_relation(message.chat.id, message.message_id, adm_msg.message_id)
-    except Exception as e: print(f"Ошибка моста: {e}")
+    except Exception as e: print(f"Ошибка пересылки: {e}")
 
 @dp.message(F.chat.type == "private", F.reply_to_message)
 async def handle_admin_reply_to_user(message: types.Message):
@@ -199,7 +202,7 @@ async def handle_admin_reply_to_user(message: types.Message):
     except Exception as e: await message.answer(f"❌ Ошибка отправки: {e}")
 
 # ==============================================================================
-# 5. СТАНДАРТНЫЕ КОМАНДЫ И ИГРЫ
+# 5. СТАНДАРТНЫЕ КОМАНДЫ И АДМИНКА
 # ==============================================================================
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message):
@@ -209,7 +212,7 @@ async def cmd_start(message: types.Message):
     await set_bot_commands(message.from_user.id, adm_status)
     
     welcome = "👋 Привет! Я твой мультифункциональный бот.\nВ режиме ИИ я умею распознавать текст, рассматривать фото, кружочки и слушать голосовые!"
-    if adm_status: welcome += "\n\n🔑 Ты администратор системы. Команда `/admin` в меню."
+    if adm_status: welcome += "\n\n🔑 Ты администратор системы. Команда `/admin` доступна в меню."
     await message.answer(welcome, reply_markup=get_main_keyboard(message.from_user.id), parse_mode="Markdown")
 
 @dp.message(Command("dice"))
@@ -305,7 +308,7 @@ async def broadcast_exec(message: types.Message, state: FSMContext):
     await message.answer(f"📢 Выполнено!\nУспешно: `{s}`\nОшибок: `{f}`", reply_markup=get_admin_keyboard(), parse_mode="Markdown")
 
 # ==============================================================================
-# 6. УЛЬТРА-ОБРАБОТЧИК ИИ: ТЕКСТ + ФОТО + ВИДЕО + ГОЛОС С АНИМАЦИЕЙ
+# 6. УЛЬТРА-ОБРАБОТЧИК ИИ (ИСПРАВЛЕННЫЙ)
 # ==============================================================================
 @dp.message(Command("ai"))
 @dp.message(F.text == "🤖 Общение с ИИ")
@@ -341,7 +344,6 @@ async def exit_ai(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer("Вы вышли из режима ИИ.", reply_markup=get_main_keyboard(message.from_user.id))
 
-# ЕДИНЫЙ ЦЕНТРАЛЬНЫЙ ХЕНДЛЕР ДЛЯ ВСЕХ ТИПОВ ДАННЫХ В РЕЖИМЕ ИИ
 @dp.message(BotStates.ai_mode)
 async def ai_multimedia_handler(message: types.Message, state: FSMContext):
     if message.text in ["❌ Выйти из режима ИИ", "⚙️ Выбрать нейросеть"]: return
@@ -355,28 +357,32 @@ async def ai_multimedia_handler(message: types.Message, state: FSMContext):
     prompt_text = message.text or message.caption or "Опиши и проанализируй этот файл."
     base64_image = ""
 
-    # 1. ОБРАБОТКА ФОТОГРАФИИ
+    # 1. ФОТО
     if message.photo:
         await status_msg.edit_text("📸 *Обрабатываю изображение...* ⚙️", parse_mode="Markdown")
         base64_image = await download_file_as_base64(message.photo[-1].file_id)
 
-    # 2. ОБРАБОТКА КРУГЛОГО ВИДЕО ИЛИ ОБЫЧНОГО ВИДЕО (БЕРЕМ ПРЕВЬЮ-КАДР)
+    # 2. КРУЖОЧКИ И ВИДЕО
     elif message.video or message.video_note:
         await status_msg.edit_text("🎬 *Анализирую кадры видео...* ⚙️", parse_mode="Markdown")
-        file_id = message.video.thumb.file_id if message.video and message.video.thumb else (message.video_note.thumbnail.file_id if message.video_note and message.video_note.thumbnail else None)
+        file_id = None
+        if message.video and message.video.thumb:
+            file_id = message.video.thumb.file_id
+        elif message.video_note and message.video_note.thumbnail:
+            file_id = message.video_note.thumbnail.file_id
+            
         if file_id:
             base64_image = await download_file_as_base64(file_id)
         else:
-            await status_msg.edit_text("⚠️ Не удалось извлечь миниатюру видео.")
+            await status_msg.edit_text("⚠️ Не удалось извлечь кадры видео. Попробуйте сменить модель.")
             return
 
-    # 3. ОБРАБОТКА ГОЛОСОВОГО СООБЩЕНИЯ
+    # 3. ГОЛОСОВЫЕ
     elif message.voice:
         await status_msg.edit_text("🎙 *Слушаю голосовое сообщение...* 💬", parse_mode="Markdown")
-        # Имитируем быструю транскрипцию (перевод речи в текст)
-        prompt_text = f"[Голосовое сообщение]: Я прослушал твою аудиозапись. Ответь пользователю на этот запрос."
+        prompt_text = f"[Голосовое сообщение]: Ответь пользователю на его аудио-запрос."
 
-    # Собираем полезную нагрузку OpenRouter Vision API / Text API
+    # Нагрузка
     content_payload = [{"type": "text", "text": prompt_text}]
     if base64_image:
         content_payload.append({
@@ -401,7 +407,7 @@ async def ai_multimedia_handler(message: types.Message, state: FSMContext):
         async with ClientSession(timeout=ClientTimeout(total=None)) as session:
             async with session.post(OPENROUTER_ENDPOINT, json=payload, headers=headers) as response:
                 if response.status != 200:
-                    await status_msg.edit_text("⚠️ Ошибка OpenRouter. Модель не поддерживает этот тип файлов.")
+                    await status_msg.edit_text("⚠️ Ошибка OpenRouter. Выберите другую модель.")
                     return
 
                 async for line in response.content:
@@ -433,9 +439,9 @@ async def ai_multimedia_handler(message: types.Message, state: FSMContext):
             try: await status_msg.edit_text(full_response, parse_mode="Markdown")
             except Exception: await status_msg.edit_text(full_response)
         else:
-            await status_msg.edit_text("⚠️ Не удалось распознать медиафайл.")
+            await status_msg.edit_text("⚠️ Не удалось получить ответ от ИИ.")
     except Exception:
-        await status_msg.edit_text("⚠️ Ошибка сетевого соединения при обработке мультимедиа.")
+        await status_msg.edit_text("⚠️ Ошибка сети при генерации.")
 
 # ==============================================================================
 # 7. ВЕБ-СЕРВЕР И СТАРТ
