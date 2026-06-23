@@ -36,7 +36,7 @@ class BotStates(StatesGroup):
 # МЕСТО ДЛЯ ТВОЕЙ ССЫЛКИ CLOUDFLARE AI GATEWAY
 # ==============================================================================
 # Сюда вставлена твоя личная ссылка со специальным правильным окончанием для формата Gemini API
-GEMINI_PROXY_URL = f"https://gateway.ai.cloudflare.com/v1/42b17838faa1c270c8974a82d80aba1b/my-gemini-bot/gemini/v1/models/gemini-2.5-flash:generateContent?key={GEMINI_KEY}"
+GEMINI_PROXY_URL = f"https://gateway.ai.cloudflare.com/v1/42b17838faa1c270c8974a82d80aba1b/my-gemini-bot/gemini/v1/models/gemini-2.5-flash:generateContent?key=AQ.Ab8RN6KhDMW12Xt8YF1cFlpABddVxeWKjWWCGbwPm_LKvyH8fQ"
 
 # ==============================================================================
 # 2. РАБОТА С БАЗОЙ ДАННЫХ (ФАЙЛ)
