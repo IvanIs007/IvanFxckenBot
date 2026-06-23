@@ -10,8 +10,8 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 
-# Используем встроенный в aiogram легкий aiohttp для запросов к бесплатному агрегатору
-import aiohttp
+# Возвращаем g4f
+import g4f
 
 # --- НАСТРОЙКИ ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ---
 BOT_TOKEN = os.environ["BOT_TOKEN"]
@@ -98,44 +98,40 @@ async def start_cmd(message: Message):
             reply_markup=get_user_kb()
         )
 
-# --- БЕСПЛАТНЫЙ ИИ ЧЕРЕЗ СТАБИЛЬНЫЙ ВЕБ-АГРЕГАТОР ---
+# --- РАБОТА С G4F (С ИСТОРИЕЙ СООБЩЕНИЙ) ---
 async def ask_free_ai(user_id: int, prompt: str) -> str:
     try:
         if user_id not in ai_history:
             ai_history[user_id] = [
-                {"role": "system", "content": "Ты — крутой ИИ-ассистент в боте IvanFuckenBot. Отвечай кратко, современно, используй сленг и пиши строго по делу. Ты ведешь полноценный непрерывный диалог и помнишь всё, что пользователь писал ранее."}
+                {"role": "system", "content": "Ты — IvanFuckenBot. Отвечай кратко, используй сленг и пиши строго по делу."}
             ]
-            
         ai_history[user_id].append({"role": "user", "content": prompt})
-        
-        # Отправляем JSON-запрос на отказоустойчивый keyless шлюз Pollinations AI
-        payload = {
-            "messages": ai_history[user_id],
-            "model": "openai"  # Использует быструю и мощную модель
-        }
-        
-        async with aiohttp.ClientSession() as session:
-            async with session.post("https://text.pollinations.ai/", json=payload, timeout=25) as response:
-                if response.status == 200:
-                    reply_text = await response.text()
-                    reply_text = reply_text.strip()
-                    
-                    if reply_text:
-                        ai_history[user_id].append({"role": "assistant", "content": reply_text})
-                        
-                        # Ограничиваем историю, чтобы бот не тратил лишнюю память
-                        if len(ai_history[user_id]) > 14:
-                            ai_history[user_id] = [ai_history[user_id][0]] + ai_history[user_id][-10:]
-                            
-                        return reply_text
-                        
-        return "⚠️ Не удалось получить ответ от серверов нейросети. Попробуй через минуту!"
-        
+
+        # Запускаем синхронную g4f в отдельном потоке, чтобы бот не зависал
+        response = await asyncio.to_thread(
+            g4f.ChatCompletion.create,
+            model="gpt-4o",
+            messages=ai_history[user_id],
+        )
+
+        if response:
+            ai_history[user_id].append({"role": "assistant", "content": response})
+            
+            # Обрезаем историю диалога, чтобы контекст не раздувался
+            if len(ai_history[user_id]) > 8:
+                ai_history[user_id] = [ai_history[user_id][0]] + ai_history[user_id][-6:]
+                
+            return response
+        else:
+            if len(ai_history[user_id]) > 1:
+                ai_history[user_id].pop()
+            return "⚠️ Провайдер g4f вернул пустой ответ. Попробуй еще раз."
+            
     except Exception as e:
-        logger.error(f"Ошибка вызова ИИ: {e}")
+        logger.error(f"Ошибка G4F: {e}")
         if user_id in ai_history and len(ai_history[user_id]) > 1:
             ai_history[user_id].pop()
-        return "⚠️ Не удалось подключиться к серверам нейросети. Попробуй через минутку!"
+        return "⚠️ Не удалось получить ответ через G4F. Сервер перегружен, повтори запрос."
 
 # --- КОМАНДЫ И CALLBACK ДЛЯ ИИ ---
 @dp.message(Command("grok"))
