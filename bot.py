@@ -10,7 +10,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from aiohttp import web, ClientSession, ClientTimeout
+from aiohttp import web, ClientSession, ClientTimeout, TCPConnector
 
 # ==============================================================================
 # 1. КОНФИГУРАЦИЯ И МОДЕЛИ
@@ -40,7 +40,6 @@ class BotStates(StatesGroup):
     admin_init_chat_msg = State()
 
 OPENROUTER_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions"
-HF_ENDPOINT = "https://api-inference.huggingface.co/v1/chat/completions"
 
 # Разделенная база данных моделей по провайдерам
 MODELS_DATABASE = {
@@ -196,7 +195,8 @@ async def request_openrouter_inline(prompt: str) -> str:
     }
     headers = {"Authorization": f"Bearer {OPENROUTER_KEY}", "Content-Type": "application/json"}
     try:
-        async with ClientSession(timeout=ClientTimeout(total=30)) as session:
+        connector = TCPConnector(use_dns_cache=False)
+        async with ClientSession(timeout=ClientTimeout(total=30), connector=connector) as session:
             async with session.post(OPENROUTER_ENDPOINT, json=payload, headers=headers) as resp:
                 if resp.status == 200:
                     result = await resp.json()
@@ -410,9 +410,9 @@ async def inline_ai_query(inline_query: types.InlineQuery):
     dice_icons = {1: "⚀", 2: "⚁", 3: "⚂", 4: "⚃", 5: "⚄", 6: "⚅"}
     
     dice_res = f"🎲 **БРОСОК В ЛЮБОМ ЧАТЕ** 🎲\n\nИван Факен:  `{b_val}`  {dice_icons[b_val]}\nТы:  `{u_val}`  {dice_icons[u_val]}\n\n"
-    if b_val > u_val: res += f"🔥 {random.choice(WIN_REPLIKAS)}"
-    elif u_val > b_val: res += f"🎉 {random.choice(LOSE_REPLIKAS)}"
-    else: res += f"🤝 {random.choice(DRAW_REPLIKAS)}"
+    if b_val > u_val: dice_res += f"🔥 {random.choice(WIN_REPLIKAS)}"
+    elif u_val > b_val: dice_res += f"🎉 {random.choice(LOSE_REPLIKAS)}"
+    else: dice_res += f"🤝 {random.choice(DRAW_REPLIKAS)}"
         
     results.append(
         types.InlineQueryResultArticle(
@@ -438,20 +438,6 @@ async def inline_ai_query(inline_query: types.InlineQuery):
         )
         
     await inline_query.answer(results, cache_time=2, is_personal=True)
-
-# Разруливаем эндпоинты в зависимости от префиксов
-    if chosen_model.startswith("hf/"):
-        actual_model = chosen_model.replace("hf/", "")
-        if "GLM-5.2" in actual_model:
-            actual_model = "zai-org/GLM-5.2"
-            
-        # Вместо общего v1/chat/completions шлем запрос напрямую в эндпоинт модели
-        current_endpoint = f"https://api-inference.huggingface.co/models/{actual_model}/v1/chat/completions"
-        current_key = HF_KEY
-    else:
-        current_endpoint = OPENROUTER_ENDPOINT
-        current_key = OPENROUTER_KEY
-        actual_model = chosen_model
 
 # ==============================================================================
 # 6. ДВУХУРОВНЕВОЕ МЕНЮ ВЫБОРА НЕЙРОСЕТЕЙ
@@ -550,6 +536,9 @@ async def ai_multimedia_handler(message: types.Message, state: FSMContext):
 
     prompt_text = message.text or message.caption or "Опиши и проанализируй этот файл."
 
+    # Прямой обход DNS кеша во всех сессиях Docker
+    connector = TCPConnector(use_dns_cache=False)
+
     # --------------------------------------------------------------------------
     # СХЕМА РАБОТЫ FLUX.2-dev (ГЕНЕРАЦИЯ КАРТИНОК)
     # --------------------------------------------------------------------------
@@ -566,7 +555,7 @@ async def ai_multimedia_handler(message: types.Message, state: FSMContext):
         payload = {"inputs": prompt_text}
         
         try:
-            async with ClientSession(timeout=ClientTimeout(total=60)) as session:
+            async with ClientSession(timeout=ClientTimeout(total=60), connector=connector) as session:
                 async with session.post(hf_img_url, json=payload, headers=headers) as resp:
                     if resp.status == 200:
                         photo_bytes = await resp.read()
@@ -620,13 +609,13 @@ async def ai_multimedia_handler(message: types.Message, state: FSMContext):
 
     # Разруливаем эндпоинты в зависимости от префиксов
     if chosen_model.startswith("hf/"):
-        current_endpoint = HF_ENDPOINT
-        current_key = HF_KEY
         actual_model = chosen_model.replace("hf/", "")
-        
-        # Специальный костыль для ссылки на GLM-5.2, если HF требует полный путь к репозиторию
         if "GLM-5.2" in actual_model:
             actual_model = "zai-org/GLM-5.2"
+        
+        # Подставляем URL конкретной модели для обхода проблем с глобальным роутингом HF
+        current_endpoint = f"https://api-inference.huggingface.co/models/{actual_model}/v1/chat/completions"
+        current_key = HF_KEY
     else:
         current_endpoint = OPENROUTER_ENDPOINT
         current_key = OPENROUTER_KEY
@@ -646,10 +635,10 @@ async def ai_multimedia_handler(message: types.Message, state: FSMContext):
     cursors = [" ⏳", " ⚡", " 🤖"]
 
     try:
-        async with ClientSession(timeout=ClientTimeout(total=None)) as session:
+        async with ClientSession(timeout=ClientTimeout(total=None), connector=connector) as session:
             async with session.post(current_endpoint, json=payload, headers=headers) as response:
                 if response.status != 200:
-                    await status_msg.edit_text(f"⚠️ Ошибка API (Код {response.status}). Возможно, модель перегружена или просыпается.")
+                    await status_msg.edit_text(f"⚠️ Ошибка сети/API (Код {response.status}). Модель на Hugging Face возможно выгружена из памяти и сейчас прогревается.")
                     return
 
                 async for line in response.content:
