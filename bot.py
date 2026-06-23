@@ -13,14 +13,15 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiohttp import web, ClientSession, ClientTimeout
 
 # ==============================================================================
-# 1. КОНФИГУРАЦИЯ И ИНИЦИАЛИЗАЦИЯ
+# 1. КОНФИГУРАЦИЯ И МОДЕЛИ
 # ==============================================================================
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 OPENROUTER_KEY = os.environ.get("OPENROUTER_API_KEY")  
+HF_KEY = os.environ.get("HF_API_KEY", "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")
 PORT = int(os.environ.get("PORT", 10000))
 
 if not BOT_TOKEN or not OPENROUTER_KEY:
-    print("КРИТИЧЕСКАЯ ОШИБКА: Проверь TELEGRAM_BOT_TOKEN и OPENROUTER_API_KEY!")
+    print("КРИТИЧЕСКАЯ ОШИБКА: Проверь TELEGRAM_BOT_TOKEN и OPENROUTER_API_KEY в переменных среды!")
     sys.exit(1)
 
 bot = Bot(token=BOT_TOKEN)
@@ -34,35 +35,50 @@ MAP_FILE = "chats_map.json"
 class BotStates(StatesGroup):
     ai_mode = State()         
     support_mode = State()     
-    admin_broadcast = State() 
+    admin_broadcast = State()  
     admin_init_chat_id = State()
     admin_init_chat_msg = State()
 
 OPENROUTER_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions"
+HF_ENDPOINT = "https://api-inference.huggingface.co/v1/chat/completions"
 
+# Разделенная база данных моделей по провайдерам
 MODELS_DATABASE = {
-    "openrouter/auto": "🤖 Автовыбор OpenRouter",
-    "openrouter/owl-alpha": "🦉 Owl Alpha (Agentic)",
-    "nvidia/nemotron-3-ultra-550b-a55b:free": "⚡ Nemotron 3 Ultra 550B",
-    "google/gemma-4-31b-it:free": "🧠 Google Gemma 4 31B (Медиа)",
-    "openai/gpt-oss-20b:free": "🌌 OpenAI GPT OSS 20B",
-    "poolside/laguna-xs.2:free": "🌊 Poolside Laguna XS.2",
-    "openai/gpt-oss-120b:free": "🌌 OpenAI GPT OSS 120B",
-    "nvidia/nemotron-3-super-120b-a12b:free": "💥 Nemotron 3 Super 120B",
-    "poolside/laguna-m.1:free": "🌊 Poolside Laguna M.1",
-    "bytedance-seed/seedream-4.5": "🔮 ByteDance Seedream 4.5",
-    "google/gemma-4-26b-a4b-it:free": "🧠 Google Gemma 4 26B (Медиа)",
-    "nvidia/nemotron-nano-9b-v2:free": "🔋 Nemotron Nano 9B v2",
-    "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free": "🧩 Nemotron Omni Reasoning",
-    "cohere/north-mini-code:free": "💻 Cohere North Mini Code",
-    "nvidia/nemotron-3-nano-30b-a3b:free": "🔋 Nemotron 3 Nano 30B"
+    "openrouter": {
+        "openrouter/auto": "🤖 Автовыбор OpenRouter [👁 Vision]",
+        "google/gemma-4-31b-it:free": "🧠 Google Gemma 4 31B [👁 Vision]",
+        "google/gemma-4-26b-a4b-it:free": "🧠 Google Gemma 4 26B [👁 Vision]",
+        "bytedance-seed/seedream-4.5": "🔮 ByteDance Seedream 4.5 [👁 Vision]",
+        "openrouter/owl-alpha": "🦉 Owl Alpha (Agentic)",
+        "nvidia/nemotron-3-ultra-550b-a55b:free": "⚡ Nemotron 3 Ultra 550B",
+        "openai/gpt-oss-20b:free": "🌌 OpenAI GPT OSS 20B",
+        "openai/gpt-oss-120b:free": "🌌 OpenAI GPT OSS 120B",
+        "nvidia/nemotron-3-super-120b-a12b:free": "💥 Nemotron 3 Super 120B",
+        "nvidia/nemotron-nano-9b-v2:free": "🔋 Nemotron Nano 9B v2",
+        "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free": "🧩 Nemotron Omni Reasoning [🎙 Voice]",
+        "cohere/north-mini-code:free": "💻 Cohere North Mini Code",
+        "nvidia/nemotron-3-nano-30b-a3b:free": "🔋 Nemotron 3 Nano 30B"
+    },
+    "huggingface": {
+        "hf/google/gemma-4-12B-it": "🧠 Gemma 4 12B (HF)",
+        "hf/black-forest-labs/FLUX.2-dev": "🎨 FLUX.2 Dev [🎨 Создание Картинок]",
+        "hf/deepseek-ai/DeepSeek-V4-Flash": "⚡ DeepSeek V4 Flash (HF)",
+        "hf/microsoft/FastContext-1.0-4B-SFT": "📄 FastContext 4B (HF)",
+        "hf/nvidia/Qwen3.6-35B-A3B-NVFP4": "🥷 Qwen 3.6 35B Nvidia (HF)",
+        "hf/zai-org/GLM-5.2": "🔮 GLM 5.2 (HF)"
+    }
 }
 
+# Списки для валидации мультимедиа
 VISION_MODELS = [
     "openrouter/auto",
     "google/gemma-4-31b-it:free", 
     "google/gemma-4-26b-a4b-it:free",
     "bytedance-seed/seedream-4.5"
+]
+
+VOICE_MODELS = [
+    "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
 ]
 
 # Саркастические реплики для костей
@@ -253,7 +269,7 @@ async def handle_user_chat_to_admin(message: types.Message):
         register_msg_relation(message.chat.id, message.message_id, adm_msg.message_id)
     except Exception as e: print(f"Ошибка пересылки: {e}")
 
-@dp.message(F.chat.type == "private", F.reply_to_message)
+@dp.message(F.private, F.reply_to_message)
 async def handle_admin_reply_to_user(message: types.Message):
     if not is_admin(message.from_user.id): return
     destination = get_destination_by_admin_reply(message.reply_to_message.message_id)
@@ -279,7 +295,7 @@ async def cmd_start(message: types.Message, state: FSMContext):
     await message.answer("👋 Привет! Я твой мультифункциональный бот Иван Факен.\nВ режиме ИИ я умею работать с текстом, фото и аудио!", reply_markup=get_main_keyboard(message.from_user.id), parse_mode="Markdown")
 
 # ==============================================================================
-# ИГРА В КОСТИ (ЛОКАЛЬНАЯ) С ОПТИМИЗИРОВАННЫМ САРКАЗМОМ
+# ИГРА В КОСТИ (ЛОКАЛЬНАЯ)
 # ==============================================================================
 @dp.message(Command("dice"))
 @dp.message(F.text == "🎲 Сыграть в кости")
@@ -387,36 +403,26 @@ async def broadcast_exec(message: types.Message, state: FSMContext):
 @dp.inline_query()
 async def inline_ai_query(inline_query: types.InlineQuery):
     query_text = inline_query.query.strip()
-    
     results = []
     
-    # 1. Вариант броска костей (доступен всегда при вызове бота)
     b_val = random.randint(1, 6)
     u_val = random.randint(1, 6)
-    
     dice_icons = {1: "⚀", 2: "⚁", 3: "⚂", 4: "⚃", 5: "⚄", 6: "⚅"}
     
     dice_res = f"🎲 **БРОСОК В ЛЮБОМ ЧАТЕ** 🎲\n\nИван Факен:  `{b_val}`  {dice_icons[b_val]}\nТы:  `{u_val}`  {dice_icons[u_val]}\n\n"
-    if b_val > u_val:
-        dice_res += f"🔥 {random.choice(WIN_REPLIKAS)}"
-    elif u_val > b_val:
-        dice_res += f"🎉 {random.choice(LOSE_REPLIKAS)}"
-    else:
-        dice_res += f"🤝 {random.choice(DRAW_REPLIKAS)}"
+    if b_val > u_val: res += f"🔥 {random.choice(WIN_REPLIKAS)}"
+    elif u_val > b_val: res += f"🎉 {random.choice(LOSE_REPLIKAS)}"
+    else: res += f"🤝 {random.choice(DRAW_REPLIKAS)}"
         
     results.append(
         types.InlineQueryResultArticle(
             id="inline_dice_" + str(random.randint(1000, 9999)),
             title="🎲 Бросить кости с Иваном Факеным",
             description="Сыграть в кости прямо в этом чате и получить порцию сарказма",
-            input_message_content=types.InputTextMessageContent(
-                message_text=dice_res,
-                parse_mode="Markdown"
-            )
+            input_message_content=types.InputTextMessageContent(message_text=dice_res, parse_mode="Markdown")
         )
     )
 
-    # 2. Вариант ИИ ответа (если пользователь ввёл текст запроса)
     if query_text:
         ai_answer = await request_openrouter_inline(query_text)
         results.append(
@@ -434,7 +440,61 @@ async def inline_ai_query(inline_query: types.InlineQuery):
     await inline_query.answer(results, cache_time=2, is_personal=True)
 
 # ==============================================================================
-# 6. ОСНОВНОЙ ОБРАБОТЧИК ИИ ДЛЯ ПРИВАТНЫХ ЧАТОВ
+# 6. ДВУХУРОВНЕВОЕ МЕНЮ ВЫБОРА НЕЙРОСЕТЕЙ
+# ==============================================================================
+@dp.message(BotStates.ai_mode, F.text == "⚙️ Выбрать нейросеть")
+async def select_ai_menu(message: types.Message):
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🌐 Раздел OpenRouter API", callback_data="prov_openrouter")
+    builder.button(text="🤗 Раздел Hugging Face API", callback_data="prov_huggingface")
+    builder.adjust(1)
+    await message.answer("Выбери провайдера нейросетей:", reply_markup=builder.as_markup())
+
+@dp.callback_query(F.data.startswith("prov_"))
+async def select_provider_models(callback: types.CallbackQuery):
+    provider = callback.data.split("_")[1]
+    builder = InlineKeyboardBuilder()
+    models = MODELS_DATABASE.get(provider, {})
+    
+    for m_id, name in models.items():
+        short = m_id.split("/")[-1].replace(":free", "")[:20]
+        builder.button(text=name, callback_data=f"set_{short}")
+        
+    builder.button(text="⬅️ Назад к провайдерам", callback_data="back_to_providers")
+    builder.adjust(1)
+    
+    text_title = "🤖 Модели OpenRouter:" if provider == "openrouter" else "🤗 Модели Hugging Face:"
+    await callback.message.edit_text(text_title, reply_markup=builder.as_markup())
+    await callback.answer()
+
+@dp.callback_query(F.data == "back_to_providers")
+async def back_to_providers(callback: types.CallbackQuery):
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🌐 Раздел OpenRouter API", callback_data="prov_openrouter")
+    builder.button(text="🤗 Раздел Hugging Face API", callback_data="prov_huggingface")
+    builder.adjust(1)
+    await callback.message.edit_text("Выбери провайдера нейросетей:", reply_markup=builder.as_markup())
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("set_"))
+async def save_ai_selection(callback: types.CallbackQuery, state: FSMContext):
+    short = callback.data.split("_")[1]
+    full = "openrouter/auto"
+    found_name = "🤖 Автовыбор OpenRouter"
+    
+    for provider in MODELS_DATABASE.values():
+        for m_id, name in provider.items():
+            if short in m_id:
+                full = m_id
+                found_name = name
+                break
+
+    await state.update_data(current_model=full)
+    await callback.message.edit_text(f"✅ Модель успешно изменена на:\n**{found_name}**", parse_mode="Markdown")
+    await callback.answer()
+
+# ==============================================================================
+# 7. ОСНОВНОЙ ОБРАБОТЧИК ИИ С ВАЛИДАЦИЕЙ МУЛЬТИМЕДИА
 # ==============================================================================
 @dp.message(Command("ai"))
 @dp.message(F.text == "🤖 Общение с ИИ")
@@ -442,28 +502,14 @@ async def start_ai(message: types.Message, state: FSMContext):
     await state.set_state(BotStates.ai_mode)
     data = await state.get_data()
     model = data.get("current_model", "openrouter/auto")
-    await message.answer(f"🤖 Режим ИИ запущен!\nТекущая модель: {MODELS_DATABASE.get(model)}", reply_markup=get_ai_keyboard())
-
-@dp.message(BotStates.ai_mode, F.text == "⚙️ Выбрать нейросеть")
-async def select_ai_menu(message: types.Message):
-    builder = InlineKeyboardBuilder()
-    for m_id, name in MODELS_DATABASE.items():
-        short = m_id.split("/")[-1].replace(":free", "")[:20]
-        builder.button(text=name, callback_data=f"ai_{short}")
-    builder.adjust(1)
-    await message.answer("Выберите модель:", reply_markup=builder.as_markup())
-
-@dp.callback_query(F.data.startswith("ai_"))
-async def save_ai_selection(callback: types.CallbackQuery, state: FSMContext):
-    short = callback.data.split("_")[1]
-    full = "openrouter/auto"
-    for m_id in MODELS_DATABASE.keys():
-        if short in m_id:
-            full = m_id
+    
+    found_name = "🤖 Автовыбор OpenRouter"
+    for provider in MODELS_DATABASE.values():
+        if model in provider:
+            found_name = provider[model]
             break
-    await state.update_data(current_model=full)
-    await callback.message.edit_text(f"✅ Модель обновлена: **{MODELS_DATABASE[full]}**")
-    await callback.answer()
+            
+    await message.answer(f"🤖 Режим ИИ запущен!\nТекущая модель: {found_name}", reply_markup=get_ai_keyboard())
 
 @dp.message(BotStates.ai_mode, F.text == "❌ Выйти из режима ИИ")
 async def exit_ai(message: types.Message, state: FSMContext):
@@ -477,36 +523,75 @@ async def ai_multimedia_handler(message: types.Message, state: FSMContext):
     user_data = await state.get_data()
     chosen_model = user_data.get("current_model", "openrouter/auto")
     
-    has_media = bool(message.photo or message.video or message.video_note or message.voice)
-    
-    if has_media and chosen_model not in VISION_MODELS:
-        await message.answer("⚠️ Выбранная нейросеть поддерживает **только текст**. Пожалуйста, отправьте текстовый запрос или переключитесь на мультимедийную модель.", parse_mode="Markdown")
+    has_photo_video = bool(message.photo or message.video or message.video_note)
+    has_voice = bool(message.voice)
+
+    if has_photo_video and chosen_model not in VISION_MODELS:
+        await message.answer("⚠️ Выбранная нейросеть **не поддерживает чтение изображений**. Пожалуйста, выберите модель с пометкой `[👁 Vision]` или отправьте обычный текст.", parse_mode="Markdown")
         return
 
+    if has_voice and chosen_model not in VOICE_MODELS:
+        await message.answer("⚠️ Эта модель **не умеет слушать голос**. Пожалуйста, переключитесь на модель с пометкой `[🎙 Voice]` (например, Nemotron Omni).", parse_mode="Markdown")
+        return
+
+    prompt_text = message.text or message.caption or "Опиши и проанализируй этот файл."
+
+    # --------------------------------------------------------------------------
+    # СХЕМА РАБОТЫ FLUX.2-dev (ГЕНЕРАЦИЯ КАРТИНОК)
+    # --------------------------------------------------------------------------
+    if chosen_model == "hf/black-forest-labs/FLUX.2-dev":
+        if has_photo_video or has_voice:
+            await message.answer("⚠️ FLUX принимает **только текстовое описание** (промпт) для создания картинки.")
+            return
+            
+        await bot.send_chat_action(chat_id=message.chat.id, action="upload_photo")
+        status_msg = await message.answer("🎨 *Иван Факен запускает генератор картинок...* ⏳", parse_mode="Markdown")
+        
+        hf_img_url = "https://api-inference.huggingface.co/models/black-forest-labs/FLUX.2-dev"
+        headers = {"Authorization": f"Bearer {HF_KEY}", "Content-Type": "application/json"}
+        payload = {"inputs": prompt_text}
+        
+        try:
+            async with ClientSession(timeout=ClientTimeout(total=60)) as session:
+                async with session.post(hf_img_url, json=payload, headers=headers) as resp:
+                    if resp.status == 200:
+                        photo_bytes = await resp.read()
+                        await status_msg.delete()
+                        await message.answer_photo(
+                            photo=types.BufferedInputFile(photo_bytes, filename="flux.jpg"),
+                            caption=f"🎨 Салон ИИ Ивана Факена.\nПромпт: _{prompt_text}_",
+                            parse_mode="Markdown"
+                        )
+                        return
+                    else:
+                        await status_msg.edit_text(f"⚠️ Ошибка генерации на HF (Код {resp.status}). Модель просыпается, повторите запрос через минуту.")
+                        return
+        except Exception as e:
+            await status_msg.edit_text(f"⚠️ Ошибка при обращении к FLUX: {e}")
+            return
+
+    # --------------------------------------------------------------------------
+    # СХЕМА ТЕКСТОВОГО СТРИМИНГА (OPENROUTER / HUGGING FACE ЧАТ)
+    # --------------------------------------------------------------------------
     await bot.send_chat_action(chat_id=message.chat.id, action="typing")
     status_msg = await message.answer("⚡ *Считываю входящие данные...* 🔍", parse_mode="Markdown")
 
-    prompt_text = message.text or message.caption or "Опиши и проанализируй этот файл."
     base64_image = ""
-
     if message.photo:
         await status_msg.edit_text("📸 *Обрабатываю изображение...* ⚙️", parse_mode="Markdown")
         base64_image = await download_file_as_base64(message.photo[-1].file_id)
-
     elif message.video or message.video_note:
         await status_msg.edit_text("🎬 *Анализирую кадры видео...* ⚙️", parse_mode="Markdown")
         file_id = message.video.thumb.file_id if (message.video and message.video.thumb) else (message.video_note.thumbnail.file_id if (message.video_note and message.video_note.thumbnail) else None)
-        if file_id:
-            base64_image = await download_file_as_base64(file_id)
+        if file_id: base64_image = await download_file_as_base64(file_id)
         else:
             await status_msg.edit_text("⚠️ Не удалось извлечь кадр видео.")
             return
-
     elif message.voice:
-        await status_msg.edit_text("🎙 *Загружаю аудио...* 💬", parse_mode="Markdown")
+        await status_msg.edit_text("🎙 *Скачиваю аудио для Omni-модели...* 💬", parse_mode="Markdown")
         base64_audio = await download_file_as_base64(message.voice.file_id)
-        if base64_audio:
-            prompt_text = "Пользователь отправил голосовое сообщение. Распознай его содержимое и ответь на него."
+        if base64_audio: 
+            prompt_text = "Пользователь отправил голосовое сообщение. Ответь на него напрямую."
         else:
             await status_msg.edit_text("⚠️ Ошибка обработки аудио.")
             return
@@ -519,12 +604,26 @@ async def ai_multimedia_handler(message: types.Message, state: FSMContext):
             {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
         ]
 
+    # Разруливаем эндпоинты в зависимости от префиксов
+    if chosen_model.startswith("hf/"):
+        current_endpoint = HF_ENDPOINT
+        current_key = HF_KEY
+        actual_model = chosen_model.replace("hf/", "")
+        
+        # Специальный костыль для ссылки на GLM-5.2, если HF требует полный путь к репозиторию
+        if "GLM-5.2" in actual_model:
+            actual_model = "zai-org/GLM-5.2"
+    else:
+        current_endpoint = OPENROUTER_ENDPOINT
+        current_key = OPENROUTER_KEY
+        actual_model = chosen_model
+
     payload = {
-        "model": chosen_model, 
+        "model": actual_model, 
         "messages": [{"role": "user", "content": final_content}],
         "stream": True  
     }
-    headers = {"Authorization": f"Bearer {OPENROUTER_KEY}", "Content-Type": "application/json"}
+    headers = {"Authorization": f"Bearer {current_key}", "Content-Type": "application/json"}
     
     full_response = ""
     last_text = ""
@@ -534,9 +633,9 @@ async def ai_multimedia_handler(message: types.Message, state: FSMContext):
 
     try:
         async with ClientSession(timeout=ClientTimeout(total=None)) as session:
-            async with session.post(OPENROUTER_ENDPOINT, json=payload, headers=headers) as response:
+            async with session.post(current_endpoint, json=payload, headers=headers) as response:
                 if response.status != 200:
-                    await status_msg.edit_text(f"⚠️ Ошибка OpenRouter (Код {response.status}). Попробуйте позже.")
+                    await status_msg.edit_text(f"⚠️ Ошибка API (Код {response.status}). Возможно, модель перегружена или просыпается.")
                     return
 
                 async for line in response.content:
@@ -568,12 +667,12 @@ async def ai_multimedia_handler(message: types.Message, state: FSMContext):
             try: await status_msg.edit_text(full_response, parse_mode="Markdown")
             except Exception: await status_msg.edit_text(full_response)
         else:
-            await status_msg.edit_text("⚠️ Не удалось получить ответ.")
-    except Exception:
-        await status_msg.edit_text("⚠️ Ошибка соединения с сервером.")
+            await status_msg.edit_text("⚠️ Ответ от ИИ пуст.")
+    except Exception as e:
+        await status_msg.edit_text(f"⚠️ Ошибка сети: {e}")
 
 # ==============================================================================
-# 7. СТАРТ СЕРВЕРА И БОТА
+# 8. СТАРТ СЕРВЕРА И БОТА
 # ==============================================================================
 async def handle_ping(request): return web.Response(text="Бот онлайн!", status=200)
 
