@@ -15,6 +15,7 @@ import aiohttp
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
 PORT = int(os.environ.get("PORT", 10000))
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "") # Сюда прилетит ключ из панели Render
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -29,7 +30,7 @@ recent_chats = {}
 forward_map = {}    
 ai_mode_users = set() 
 
-# Хранилище контекста диалогов для ИИ
+# Хранилище контекста диалогов для Gemini
 ai_history = {}  
 
 class AdminStates(StatesGroup):
@@ -96,50 +97,63 @@ async def start_cmd(message: Message):
             reply_markup=get_user_kb()
         )
 
-# --- ЖЕЛЕЗОБЕТОННЫЙ БЕСПЛАТНЫЙ ИИ ЧЕРЕЗ POLLINATIONS ---
+# --- ЖЕЛЕЗОБЕТОННЫЙ ОФИЦИАЛЬНЫЙ GEMINI API ---
 async def ask_free_ai(user_id: int, prompt: str) -> str:
+    if not GEMINI_API_KEY:
+        return "⚠️ Администратор не настроил GEMINI_API_KEY в панели управления!"
+        
     try:
         if user_id not in ai_history:
-            ai_history[user_id] = [
-                {"role": "system", "content": "Ты — IvanFuckenBot, крутой ИИ-ассистент. Отвечай кратко, используй современный сленг, пиши строго на русском языке и по делу."}
-            ]
+            ai_history[user_id] = []
         
-        ai_history[user_id].append({"role": "user", "content": prompt})
+        # Формируем историю в формате Google Gemini API
+        ai_history[user_id].append({"role": "user", "parts": [{"text": prompt}]})
         
-        # Отправляем чистый структурированный POST-запрос
-        url = "https://text.pollinations.ai/"
+        # Системный промпт зашиваем прямо перед отправкой, чтобы модель знала роль
+        system_instruction = "Ты крутой ИИ-ассистент IvanFuckenBot. Отвечай кратко, используй молодежный сленг, пиши только на русском и по делу."
+        
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+        
         payload = {
-            "messages": ai_history[user_id],
-            "model": "openai-large",  # Мощная дефолтная модель, отлично держит контекст
-            "jsonMode": False
-        }
-        headers = {
-            "Content-Type": "application/json",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+            "contents": ai_history[user_id],
+            "systemInstruction": {
+                "parts": [{"text": system_instruction}]
+            },
+            "generationConfig": {
+                "temperature": 0.7,
+                "maxOutputTokens": 800
+            }
         }
         
         async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload, headers=headers, timeout=25) as response:
+            async with session.post(url, json=payload, timeout=20) as response:
                 if response.status == 200:
-                    # Сервер возвращает сразу готовый текстовый ответ, без JSON оберток!
-                    reply_text = await response.text()
-                    reply_text = reply_text.strip()
-                    
-                    if reply_text:
-                        ai_history[user_id].append({"role": "assistant", "content": reply_text})
+                    result = await response.json()
+                    try:
+                        reply_text = result['candidates'][0]['content']['parts'][0]['text']
+                        reply_text = reply_text.strip()
                         
-                        # Контролируем длину истории диалога
-                        if len(ai_history[user_id]) > 10:
-                            ai_history[user_id] = [ai_history[user_id][0]] + ai_history[user_id][-6:]
-                        return reply_text
-                        
-        return "⚠️ Нейросеть взяла паузу. Пожалуйста, отправь сообщение еще раз!"
+                        if reply_text:
+                            # Добавляем ответ модели в историю
+                            ai_history[user_id].append({"role": "model", "parts": [{"text": reply_text}]})
+                            
+                            # Ограничиваем контекст (последние 10 реплик)
+                            if len(ai_history[user_id]) > 10:
+                                ai_history[user_id] = ai_history[user_id][-10:]
+                            return reply_text
+                    except KeyError:
+                        pass
+                else:
+                    error_data = await response.text()
+                    logger.error(f"Gemini API Error: {error_data}")
+
+        return "⚠️ Нейросеть перегружена или думает слишком долго. Повтори вопрос."
         
     except Exception as e:
-        logger.error(f"Ошибка ИИ Pollinations: {e}")
-        if user_id in ai_history and len(ai_history[user_id]) > 1:
+        logger.error(f"Ошибка Gemini: {e}")
+        if user_id in ai_history and len(ai_history[user_id]) > 0:
             ai_history[user_id].pop()
-        return "⚠️ Ошибка подключения к ИИ. Попробуй повторить запрос."
+        return "⚠️ Произошла ошибка при обращении к ИИ. Попробуй позже."
 
 # --- КОМАНДЫ И CALLBACK ДЛЯ ИИ ---
 @dp.message(Command("grok"))
