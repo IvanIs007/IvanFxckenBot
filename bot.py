@@ -14,7 +14,7 @@ from aiohttp import web, ClientSession
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
 PORT = int(os.environ.get("PORT", 10000))
-ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))  
+ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))  # Твой Telegram ID (для админки)
 
 if not BOT_TOKEN or not GEMINI_KEY:
     print("КРИТИЧЕСКАЯ ОШИБКА: Проверь TELEGRAM_BOT_TOKEN и GEMINI_API_KEY в Render!")
@@ -33,10 +33,11 @@ class BotStates(StatesGroup):
     admin_private_msg = State() 
 
 # ==============================================================================
-# МЕСТО ДЛЯ ТВОЕЙ ССЫЛКИ CLOUDFLARE AI GATEWAY
+# НАСТРОЙКА ССЫЛКИ CLOUDFLARE AI GATEWAY
 # ==============================================================================
-# Сюда вставлена твоя личная ссылка со специальным правильным окончанием для формата Gemini API
-GEMINI_PROXY_URL = f"https://gateway.ai.cloudflare.com/v1/42b17838faa1c270c8974a82d80aba1b/my-gemini-bot/gemini/v1/models/gemini-2.5-flash:generateContent?key=AQ.Ab8RN6KhDMW12Xt8YF1cFlpABddVxeWKjWWCGbwPm_LKvyH8fQ"
+# Ссылка сделана чистой, без ключа "?key=" на конце. 
+# Теперь ключ передается в заголовках, чтобы формат AQ... не вызывал ошибок!
+GEMINI_PROXY_URL = "https://gateway.ai.cloudflare.com/v1/42b17838faa1c270c8974a82d80aba1b/my-gemini-bot/gemini/v1/models/gemini-2.5-flash:generateContent"
 
 # ==============================================================================
 # 2. РАБОТА С БАЗОЙ ДАННЫХ (ФАЙЛ)
@@ -156,8 +157,42 @@ async def admin_broadcast_exec(message: types.Message, state: FSMContext):
         except Exception: pass
     await message.answer(f"✅ Рассылка завершена! Успешно доставлено: [{success}/{len(users)}]", reply_markup=get_admin_keyboard())
 
+@dp.message(F.text == "✉️ Написать пользователю")
+async def admin_private_start(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID: return
+    await state.set_state(BotStates.admin_private_id)
+    await message.answer("👤 Введите Telegram ID пользователя:")
+
+@dp.message(BotStates.admin_private_id)
+async def admin_private_id_rcv(message: types.Message, state: FSMContext):
+    if not message.text.isdigit():
+        await message.answer("Ошибка: ID должен состоять только из цифр. Введите заново:")
+        return
+    await state.update_data(target_id=int(message.text))
+    await state.set_state(BotStates.admin_private_msg)
+    await message.answer(f"Напишите текст сообщения для ID `{message.text}`:")
+
+@dp.message(BotStates.admin_private_msg)
+async def admin_private_msg_exec(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    target_id = data.get("target_id")
+    await state.clear()
+    try:
+        await bot.send_message(chat_id=target_id, text=f"💬 **Сообщение от администратора:**\n\n{message.text}")
+        await message.answer("✅ Отправлено успешно!", reply_markup=get_admin_keyboard())
+    except Exception as e:
+        await message.answer(f"❌ Не удалось отправить. Ошибка: {e}", reply_markup=get_admin_keyboard())
+
+@dp.message(F.text == "📁 Скачать базу users.txt")
+async def admin_download_db(message: types.Message):
+    if message.from_user.id != ADMIN_ID: return
+    if os.path.exists(USERS_FILE):
+        await message.answer_document(types.FSInputFile(USERS_FILE), caption="Актуальный бэкап пользователей")
+    else:
+        await message.answer("База пользователей еще не создана.")
+
 # ==============================================================================
-# 6. ОБРАБОТКА ЗАПРОСОВ К GEMINI ЧЕРЕЗ СТРУКТУРИРОВАННЫЙ JSON ТЕЛО
+# 6. ОБРАБОТКА ЗАПРОСОВ К GEMINI (БЕЗОПАСНАЯ АВТОРИЗАЦИЯ)
 # ==============================================================================
 @dp.message(BotStates.ai_mode)
 async def handle_ai_request(message: types.Message):
@@ -166,7 +201,6 @@ async def handle_ai_request(message: types.Message):
     
     await bot.send_chat_action(chat_id=message.chat.id, action="typing")
     
-    # Исправленная структура JSON под требования Google Gemini API
     payload = {
         "contents": [
             {
@@ -177,20 +211,23 @@ async def handle_ai_request(message: types.Message):
         ]
     }
     
-    headers = {"Content-Type": "application/json"}
+    # Передаем ваш ключ через специальный заголовок, чтобы прокси не ломало строку
+    headers = {
+        "Content-Type": "application/json",
+        "x-goog-api-key": GEMINI_KEY
+    }
 
     try:
         async with ClientSession() as session:
             async with session.post(GEMINI_PROXY_URL, json=payload, headers=headers, timeout=30) as response:
                 if response.status == 200:
                     data = await response.json()
-                    # Безопасное извлечение текста ответа
                     ai_text = data['candidates'][0]['content']['parts'][0]['text']
                     await message.answer(ai_text)
+                elif response.status in [401, 403]:
+                    await message.answer("⚠️ Ошибка авторизации. Проверь правильность сохраненного ключа AQ... в настройках Render!")
                 elif response.status == 429:
                     await message.answer("⚠️ Превышен лимит запросов к Google Gemini (429). Подождите минуту.")
-                elif response.status in [401, 403]:
-                    await message.answer("⚠️ Ошибка авторизации. Проверь правильность ключа GEMINI_API_KEY в Render!")
                 else:
                     await message.answer(f"⚠️ Ошибка прокси-шлюза. Код ответа сервера: {response.status}")
     except Exception as e:
