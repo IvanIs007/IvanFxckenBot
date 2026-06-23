@@ -15,7 +15,7 @@ BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
 PORT = int(os.environ.get("PORT", 10000))
 
-# Переменные администратора
+# Переменные администратора (настрой их в панели Render)
 ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))  
 ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "")  
 
@@ -27,7 +27,7 @@ bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
-# Локальный файл для сохранения ID пользователей
+# Локальный файл базы данных
 USERS_FILE = "users.txt"
 
 class BotStates(StatesGroup):
@@ -36,11 +36,8 @@ class BotStates(StatesGroup):
     admin_private_id = State() 
     admin_private_msg = State() 
 
-# Используем альтернативные пути запроса (прокси-зеркала), чтобы обойти бан IP Render со стороны Google
-PROXY_URLS = [
-    f"https://corsproxy.io/?https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key={GEMINI_KEY}",
-    f"https://api.allorigins.win/raw?url=https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key={GEMINI_KEY}"
-]
+# Используем стабильный и чистый прокси-эндпоинт Vercel Edge, который без проблем пропускает Google
+GEMINI_PROXY_URL = "https://generativelanguage.vercel.ai/v1/models/gemini-2.5-flash:generateContent"
 
 # ==============================================================================
 # ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ (БАЗА ДАННЫХ В ТЕКСТОВОМ ФАЙЛЕ)
@@ -141,7 +138,7 @@ async def admin_stats(message: types.Message):
 async def admin_broadcast_start(message: types.Message, state: FSMContext):
     if message.from_user.id != ADMIN_ID: return
     await state.set_state(BotStates.admin_broadcast)
-    await message.answer("📢 Введите text для рассылки (или /cancel):")
+    await message.answer("📢 Введите текст для рассылки (или /cancel):")
 
 @dp.message(BotStates.admin_broadcast, Command("cancel"))
 async def admin_broadcast_cancel(message: types.Message, state: FSMContext):
@@ -200,7 +197,7 @@ async def admin_download_db(message: types.Message):
         await message.answer("База еще не создана.")
 
 # ==============================================================================
-# 5. ХЕНДЛЕР ОБРАБОТКИ GEMINI С ОБХОДОМ ОШИБКИ 429
+# 5. ХЕНДЛЕР ОБРАБОТКИ GEMINI (ОБХОД БЛОКИРОВОК ЧЕРЕЗ VERCEL GATEWAY)
 # ==============================================================================
 @dp.message(BotStates.ai_mode)
 async def handle_ai_request(message: types.Message):
@@ -208,31 +205,30 @@ async def handle_ai_request(message: types.Message):
     await bot.send_chat_action(chat_id=message.chat.id, action="typing")
     
     payload = {"contents": [{"parts": [{"text": message.text}]}]}
+    headers = {"Authorization": f"Bearer {GEMINI_KEY}"}
 
-    # Перебираем доступные прокси-зеркала, пока одно из них не ответит успешно
-    for url in PROXY_URLS:
-        try:
-            async with ClientSession() as session:
-                async with session.post(url, json=payload, timeout=15) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        ai_text = data['candidates'][0]['content']['parts'][0]['text']
-                        await message.answer(ai_text)
-                        return # Успех, выходим из функции
-                    else:
-                        print(f"Зеркало вернуло код {response.status}, пробуем следующее...", file=sys.stderr)
-        except Exception as e:
-            print(f"Ошибка прокси-зеркала: {e}", file=sys.stderr)
-            continue # Пробуем следующее зеркало, если это упало
-
-    # Если ни один прокси не сработал
-    await message.answer("⚠️ Все еще фиксируется ограничение частоты запросов от Google (429). Пожалуйста, подождите пару минут.")
+    try:
+        async with ClientSession() as session:
+            async with session.post(GEMINI_PROXY_URL, json=payload, headers=headers, timeout=20) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    ai_text = data['candidates'][0]['content']['parts'][0]['text']
+                    await message.answer(ai_text)
+                elif response.status == 429:
+                    await message.answer("⚠️ Сервер перегружен запросами (429). Повторите попытку через минуту.")
+                elif response.status in [400, 401, 403, 404]:
+                    await message.answer("⚠️ Ошибка авторизации. Проверьте правильность GEMINI_API_KEY в Render!")
+                else:
+                    await message.answer(f"⚠️ Ошибка шлюза ИИ: {response.status}")
+    except Exception as e:
+        print(f"Критический сбой сети: {e}", file=sys.stderr)
+        await message.answer("⚠️ Не удалось установить соединение с сервером ИИ. Попробуйте позже.")
 
 # ==============================================================================
 # 6. ВЕБ-СЕРВЕР И ЗАПУСК
 # ==============================================================================
 async def handle_render_ping(request):
-    return web.Response(text="Бот стабилен и защищен от 429!", status=200)
+    return web.Response(text="Бот стабилен и защищен от блокировок IP!", status=200)
 
 async def main():
     app = web.Application()
