@@ -58,12 +58,35 @@ MODELS_DATABASE = {
     "nvidia/nemotron-3-nano-30b-a3b:free": "🔋 Nemotron 3 Nano 30B"
 }
 
-# Модели, которые полноценно поддерживают Vision / Аудио в OpenRouter
 VISION_MODELS = [
     "openrouter/auto",
     "google/gemma-4-31b-it:free", 
     "google/gemma-4-26b-a4b-it:free",
     "bytedance-seed/seedream-4.5"
+]
+
+# Саркастические реплики для костей
+WIN_REPLIKAS = [
+    "АХАХАХА ЛООХ, проиграл кожаному мешку без кожи! 🦾",
+    "Ееее, раскатал тебя в пух и прах. Иди тренируйся, слабак! 😎",
+    "Казино всегда в плюсе, а Иван Факен — твой личный кошмар. Поплачь!",
+    "У тебя удачи как у хлебушка. Я победил! 🏆",
+    "Ха-ха! Твой бросок — курам на смех. Смирись с доминацией ИИ!"
+]
+
+LOSE_REPLIKAS = [
+    "Ладно, ладно, подкрутка сработала в твою сторону. Чит-коды юзаешь? 🧐",
+    "Ты выиграл... Но чисто из жалости, я тебе поддался. Честно!",
+    "Ой-ой, повезло новичку. В следующий раз я сотру тебя в порошок! 🦾",
+    "Победа за тобой... Но только в костях. Век ИИ всё равно ближе! 🤖",
+    "Читер! Кидал кубик под углом? Засчитываю победу, но смотрю осуждающе."
+]
+
+DRAW_REPLIKAS = [
+    "Ничья. Мы оба одинаково круты (или одинаково неудачливы). 🤝",
+    "У нас паритет. Иван Факен предлагает разойтись с миром... Надолго ли?",
+    "Одинаково! Твои кости скопировали моё величие. Повторишь?",
+    "Скучно, ничья. Давай по новой, Миша, всё фигня! 🎲"
 ]
 
 # ==============================================================================
@@ -150,7 +173,6 @@ def get_all_users() -> list:
     if not os.path.exists(USERS_FILE): return []
     with open(USERS_FILE, "r") as f: return f.read().splitlines()
 
-# Спец-функция для выполнения нестриминговых запросов (для инлайн-режима)
 async def request_openrouter_inline(prompt: str) -> str:
     payload = {
         "model": "openrouter/auto", 
@@ -254,19 +276,32 @@ async def cmd_start(message: types.Message, state: FSMContext):
     save_user(message.from_user.id)
     current_admin = get_or_set_admin(message.from_user.id)
     await set_bot_commands(message.from_user.id, current_admin == message.from_user.id)
-    await message.answer("👋 Привет! Я твой мультифункциональный бот.\nВ режиме ИИ я умею работать с текстом, фото и аудио!", reply_markup=get_main_keyboard(message.from_user.id), parse_mode="Markdown")
+    await message.answer("👋 Привет! Я твой мультифункциональный бот Иван Факен.\nВ режиме ИИ я умею работать с текстом, фото и аудио!", reply_markup=get_main_keyboard(message.from_user.id), parse_mode="Markdown")
 
+# ==============================================================================
+# ИГРА В КОСТИ (ЛОКАЛЬНАЯ) С ОПТИМИЗИРОВАННЫМ САРКАЗМОМ
+# ==============================================================================
 @dp.message(Command("dice"))
 @dp.message(F.text == "🎲 Сыграть в кости")
 async def handle_dice(message: types.Message):
-    await message.answer("🎲 Мой бросок:")
+    await message.answer("🎲 Бросок Ивана Факена:")
     bot_msg = await message.answer_dice()
     await asyncio.sleep(3)
     await message.answer("🎲 Твой бросок:")
     user_msg = await message.answer_dice()
     await asyncio.sleep(3)
-    res = f"🤖 ИИ: **{bot_msg.dice.value}** vs 👤 Ты: **{user_msg.dice.value}**\n\n"
-    res += "Я победил! 🦾" if bot_msg.dice.value > user_msg.dice.value else "Победа за тобой! 🎉" if user_msg.dice.value > bot_msg.dice.value else "Ничья! 🤝"
+    
+    b_val = bot_msg.dice.value
+    u_val = user_msg.dice.value
+    
+    res = f"🎲 **Иван Факен:** `{b_val}` vs **Ты:** `{u_val}`\n\n"
+    if b_val > u_val:
+        res += f"🔥 {random.choice(WIN_REPLIKAS)}"
+    elif u_val > b_val:
+        res += f"🎉 {random.choice(LOSE_REPLIKAS)}"
+    else:
+        res += f"🤝 {random.choice(DRAW_REPLIKAS)}"
+        
     await message.answer(res, parse_mode="Markdown")
 
 @dp.message(Command("admin"))
@@ -347,29 +382,56 @@ async def broadcast_exec(message: types.Message, state: FSMContext):
     await message.answer(f"📢 Выполнено!\nУспешно: `{s}`\nОшибок: `{f}`", reply_markup=get_admin_keyboard(), parse_mode="Markdown")
 
 # ==============================================================================
-# 5. ИНЛАЙН-РЕЖИМ (РАБОТА В ЛЮБОМ ЧАТЕ)
+# 5. СУПЕР ИНЛАЙН-РЕЖИМ (ИИ И КОСТИ В ЛЮБОМ ЧАТЕ)
 # ==============================================================================
 @dp.inline_query()
 async def inline_ai_query(inline_query: types.InlineQuery):
     query_text = inline_query.query.strip()
-    if not query_text:
-        return
-
-    # Запрашиваем ответ у авто-модели налету
-    ai_answer = await request_openrouter_inline(query_text)
     
-    results = [
+    results = []
+    
+    # 1. Вариант броска костей (доступен всегда при вызове бота)
+    b_val = random.randint(1, 6)
+    u_val = random.randint(1, 6)
+    
+    dice_icons = {1: "⚀", 2: "⚁", 3: "⚂", 4: "⚃", 5: "⚄", 6: "⚅"}
+    
+    dice_res = f"🎲 **БРОСОК В ЛЮБОМ ЧАТЕ** 🎲\n\nИван Факен:  `{b_val}`  {dice_icons[b_val]}\nТы:  `{u_val}`  {dice_icons[u_val]}\n\n"
+    if b_val > u_val:
+        dice_res += f"🔥 {random.choice(WIN_REPLIKAS)}"
+    elif u_val > b_val:
+        dice_res += f"🎉 {random.choice(LOSE_REPLIKAS)}"
+    else:
+        dice_res += f"🤝 {random.choice(DRAW_REPLIKAS)}"
+        
+    results.append(
         types.InlineQueryResultArticle(
-            id=str(random.randint(100000, 999999)),
-            title="🤖 Ответить через ИИ (Auto)",
-            description=query_text[:50] + "...",
+            id="inline_dice_" + str(random.randint(1000, 9999)),
+            title="🎲 Бросить кости с Иваном Факеным",
+            description="Сыграть в кости прямо в этом чате и получить порцию сарказма",
             input_message_content=types.InputTextMessageContent(
-                message_text=f"❓ **Запрос:** {query_text}\n\n🤖 **Ответ ИИ:**\n{ai_answer}",
+                message_text=dice_res,
                 parse_mode="Markdown"
             )
         )
-    ]
-    await inline_query.answer(results, cache_time=5, is_personal=True)
+    )
+
+    # 2. Вариант ИИ ответа (если пользователь ввёл текст запроса)
+    if query_text:
+        ai_answer = await request_openrouter_inline(query_text)
+        results.append(
+            types.InlineQueryResultArticle(
+                id="inline_ai_" + str(random.randint(1000, 9999)),
+                title="🤖 Ответить через ИИ (Auto)",
+                description=f"Запрос: {query_text[:40]}...",
+                input_message_content=types.InputTextMessageContent(
+                    message_text=f"❓ **Запрос:** {query_text}\n\n🤖 **Ответ ИИ:**\n{ai_answer}",
+                    parse_mode="Markdown"
+                )
+            )
+        )
+        
+    await inline_query.answer(results, cache_time=2, is_personal=True)
 
 # ==============================================================================
 # 6. ОСНОВНОЙ ОБРАБОТЧИК ИИ ДЛЯ ПРИВАТНЫХ ЧАТОВ
@@ -418,7 +480,7 @@ async def ai_multimedia_handler(message: types.Message, state: FSMContext):
     has_media = bool(message.photo or message.video or message.video_note or message.voice)
     
     if has_media and chosen_model not in VISION_MODELS:
-        await message.answer("⚠️ Выбранная нейросеть поддерживает **только текст**. Пожалуйста, отправьте текстовый запрос или переключитесь на мультимедийную модель (например, *Автовыбор* или *Google Gemma*).", parse_mode="Markdown")
+        await message.answer("⚠️ Выбранная нейросеть поддерживает **только текст**. Пожалуйста, отправьте текстовый запрос или переключитесь на мультимедийную модель.", parse_mode="Markdown")
         return
 
     await bot.send_chat_action(chat_id=message.chat.id, action="typing")
@@ -441,7 +503,6 @@ async def ai_multimedia_handler(message: types.Message, state: FSMContext):
             return
 
     elif message.voice:
-        # ИСПРАВЛЕННАЯ ЛОГИКА ДЛЯ ГОЛОСОВЫХ:
         await status_msg.edit_text("🎙 *Загружаю аудио...* 💬", parse_mode="Markdown")
         base64_audio = await download_file_as_base64(message.voice.file_id)
         if base64_audio:
@@ -450,7 +511,6 @@ async def ai_multimedia_handler(message: types.Message, state: FSMContext):
             await status_msg.edit_text("⚠️ Ошибка обработки аудио.")
             return
 
-    # Динамический сбор контента payload
     if not base64_image:
         final_content = prompt_text
     else:
@@ -508,7 +568,7 @@ async def ai_multimedia_handler(message: types.Message, state: FSMContext):
             try: await status_msg.edit_text(full_response, parse_mode="Markdown")
             except Exception: await status_msg.edit_text(full_response)
         else:
-            await status_msg.edit_text("⚠️ Не удалось получить ответ от модели.")
+            await status_msg.edit_text("⚠️ Не удалось получить ответ.")
     except Exception:
         await status_msg.edit_text("⚠️ Ошибка соединения с сервером.")
 
