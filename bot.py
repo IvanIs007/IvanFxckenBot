@@ -15,9 +15,9 @@ BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
 PORT = int(os.environ.get("PORT", 10000))
 
-# Переменные администратора (Рекомендуется добавить в Environment Variables на Render)
-ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))  # Твой численный ID, например 123456789
-ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "")  # Твой ник без @
+# Переменные администратора (Задай их в Environment Variables на Render)
+ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))  
+ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "")  
 
 if not BOT_TOKEN or not GEMINI_KEY:
     print("КРИТИЧЕСКАЯ ОШИБКА: Проверь TELEGRAM_BOT_TOKEN и GEMINI_API_KEY на Render!")
@@ -27,7 +27,7 @@ bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
-# Файл локальной мини-базы данных
+# Локальный файл для сохранения ID пользователей
 USERS_FILE = "users.txt"
 
 # Состояния FSM
@@ -37,10 +37,11 @@ class BotStates(StatesGroup):
     admin_private_id = State() # Ожидание ID для личного ответа
     admin_private_msg = State() # Ожидание текста для личного ответа
 
-GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_KEY}"
+# Используем стабильную версию v1 API, чтобы избежать частых ошибок 429 на хостингах
+GEMINI_URL = f"https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key={GEMINI_KEY}"
 
 # ==============================================================================
-# ВСПOMОГАТЕЛЬНЫЕ ФУНКЦИИ (БАЗА ДАННЫХ В ФАЙЛЕ)
+# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ (БАЗА ДАННЫХ В ТЕКСТОВОМ ФАЙЛЕ)
 # ==============================================================================
 def save_user(user_id: int):
     """Сохраняет ID пользователя, если его еще нет в файле"""
@@ -97,7 +98,7 @@ def get_admin_keyboard():
 # ==============================================================================
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message):
-    save_user(message.from_user.id)  # Сохраняем пользователя в базу
+    save_user(message.from_user.id)  # Сохраняем пользователя в файл
     welcome_text = (
         "✌️ Здорова! Я новый бот. Можешь послушать мои треки, "
         "рискнуть сыграть со мной в кости или пообщаться с искусственным интеллектом абсолютно бесплатно!\n\n"
@@ -109,12 +110,18 @@ async def cmd_start(message: types.Message):
 @dp.message(F.text == "🤖 Общение с ИИ")
 async def start_gemini_mode(message: types.Message, state: FSMContext):
     await state.set_state(BotStates.ai_mode)
-    await message.answer("🤖 Режим общения с нейросетью активирован!\n\nЗадавай свои вопросы:", reply_markup=get_exit_keyboard())
+    await message.answer(
+        "🤖 Режим общения с нейросетью активирован!\n\nЗадавай свои вопросы:", 
+        reply_markup=get_exit_keyboard()
+    )
 
 @dp.message(BotStates.ai_mode, F.text == "❌ Выйти из режима ИИ")
 async def exit_gemini_mode(message: types.Message, state: FSMContext):
     await state.clear()
-    await message.answer("Вы вышли из режима ИИ. Переключаю на главное меню.", reply_markup=get_main_keyboard())
+    await message.answer(
+        "Вы вышли из режима ИИ. Переключаю на главное меню.", 
+        reply_markup=get_main_keyboard()
+    )
 
 @dp.message(F.text == "🎧 Послушать треки")
 async def handle_tracks(message: types.Message):
@@ -130,7 +137,7 @@ async def handle_dice(message: types.Message):
 @dp.message(Command("admin"))
 async def cmd_admin(message: types.Message):
     if message.from_user.id != ADMIN_ID:
-        return # Игнорируем не-админов
+        return  # Не реагируем, если пишет не админ
     await message.answer("🔑 Добро пожаловать в панель администратора, Босс!", reply_markup=get_admin_keyboard())
 
 @dp.message(F.text == "🚪 Выйти из админки")
@@ -144,7 +151,7 @@ async def admin_stats(message: types.Message):
     count = get_users_count()
     await message.answer(f"📊 **Статистика бота:**\n\nВсего уникальных пользователей: `{count}`")
 
-# --- ЛОГИКА РАССЫЛКИ ---
+# --- МАССОВАЯ РАССЫЛКА ---
 @dp.message(F.text == "📢 Рассылка")
 async def admin_broadcast_start(message: types.Message, state: FSMContext):
     if message.from_user.id != ADMIN_ID: return
@@ -171,13 +178,13 @@ async def admin_broadcast_exec(message: types.Message, state: FSMContext):
         try:
             await bot.send_message(chat_id=int(user_id), text=message.text)
             success += 1
-            await asyncio.sleep(0.05) # Защита от флуд-лимитов Telegram
+            await asyncio.sleep(0.05)  # Защита от лимитов отправки Telegram
         except Exception:
-            pass # Если заблокировал бота, пропускаем
+            pass  # Если пользователь заблокировал бота, просто идем дальше
 
     await message.answer(f"✅ Рассылка завершена!\nУспешно доставлено: {success}/{len(users)}", reply_markup=get_admin_keyboard())
 
-# --- ЛОГИКА ЛИЧНОГО СООБЩЕНИЯ ---
+# --- ОТПРАВКА ЛИЧНОГО СООБЩЕНИЯ ПО ID ---
 @dp.message(F.text == "✉️ Написать пользователю")
 async def admin_private_start(message: types.Message, state: FSMContext):
     if message.from_user.id != ADMIN_ID: return
@@ -191,7 +198,7 @@ async def admin_private_id_rcv(message: types.Message, state: FSMContext):
         return
     await state.update_data(target_id=int(message.text))
     await state.set_state(BotStates.admin_private_msg)
-    await message.answer(f"Текст отправки для ID `{message.text}`. Напишите сообщение:")
+    await message.answer(f"Отлично. Теперь напишите текст сообщения для ID `{message.text}`:")
 
 @dp.message(BotStates.admin_private_msg)
 async def admin_private_msg_exec(message: types.Message, state: FSMContext):
@@ -201,27 +208,31 @@ async def admin_private_msg_exec(message: types.Message, state: FSMContext):
     
     try:
         await bot.send_message(chat_id=target_id, text=f"💬 **Сообщение от администратора:**\n\n{message.text}")
-        await message.answer("✅ Сообщение успешно отправлено пользователю!", reply_markup=get_admin_keyboard())
+        await message.answer("✅ Сообщение успешно отправлено!", reply_markup=get_admin_keyboard())
     except Exception as e:
         await message.answer(f"❌ Не удалось отправить сообщение: {e}", reply_markup=get_admin_keyboard())
 
-# --- СКАЧИВАНИЕ БЭКАПА БАЗЫ ---
+# --- СКАЧИВАНИЕ ФАЙЛА БАЗЫ ДАННЫХ ---
 @dp.message(F.text == "📁 Скачать базу users.txt")
 async def admin_download_db(message: types.Message):
     if message.from_user.id != ADMIN_ID: return
     if os.path.exists(USERS_FILE):
         file = types.FSInputFile(USERS_FILE)
-        await message.answer_document(file, caption="Бэкап файла пользователей")
+        await message.answer_document(file, caption="Бэкап файла уникальных пользователей")
     else:
         await message.answer("Файл базы данных еще не создан.")
 
 # ==============================================================================
-# 5. ХЕНДЛЕР ОБРАБОТКИ GEMINI ИИ
+# 5. ХЕНДЛЕР ОБРАБОТКИ GEMINI 2.5 FLASH ИИ
 # ==============================================================================
 @dp.message(BotStates.ai_mode)
 async def handle_ai_request(message: types.Message):
     if not message.text: return
+    
+    # Отправляем статус "печать", пока ожидаем ответ от Google
     await bot.send_chat_action(chat_id=message.chat.id, action="typing")
+    
+    # Структура JSON тела запроса для Google API
     payload = {"contents": [{"parts": [{"text": message.text}]}]}
 
     try:
@@ -231,29 +242,33 @@ async def handle_ai_request(message: types.Message):
                     data = await response.json()
                     ai_text = data['candidates'][0]['content']['parts'][0]['text']
                     await message.answer(ai_text)
+                elif response.status == 429:
+                    await message.answer("⚠️ Ошибка 429 (Превышена квота). Google временно ограничил этот запрос. Пожалуйста, подождите минуту и повторите.")
                 elif response.status in [400, 404]:
-                    await message.answer("⚠️ Ошибка API (Неверный ключ). Проверь GEMINI_API_KEY на Render!")
+                    await message.answer("⚠️ Ошибка API (Неверный ключ). Проверь переменную GEMINI_API_KEY на Render!")
                 else:
-                    await message.answer(f"⚠️ Сервер Google ответил ошибкой: {response.status}")
+                    await message.answer(f"⚠️ Сервер Google вернул ошибку с кодом: {response.status}")
     except Exception as e:
-        print(f"Ошибка запроса: {e}", file=sys.stderr)
-        await message.answer("⚠️ Не удалось связаться с нейросетью. Попробуй позже.")
+        print(f"Ошибка HTTP-запроса к Gemini: {e}", file=sys.stderr)
+        await message.answer("⚠️ Не удалось получить ответ от нейросети. Попробуйте позже.")
 
 # ==============================================================================
 # 6. ВЕБ-СЕРВЕР И ЗАПУСК
 # ==============================================================================
 async def handle_render_ping(request):
-    return web.Response(text="Бот онлайн внутри Docker с Админ-панелью!", status=200)
+    return web.Response(text="Бот и Админ-панель успешно запущены внутри Docker!", status=200)
 
 async def main():
+    # Поднимаем aiohttp веб-сервер для успешного прохождения Port Scan на Render
     app = web.Application()
     app.router.add_get('/', handle_render_ping)
+    
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, host='0.0.0.0', port=PORT)
     await site.start()
 
-    print("Запуск Телеграм бота с Админ-панелью...")
+    print("Запуск Телеграм бота...")
     try:
         await dp.start_polling(bot)
     finally:
