@@ -4,6 +4,7 @@ import os
 import threading
 import urllib.request
 import urllib.parse
+import json
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, BotCommand, BotCommandScopeChat, BotCommandScopeDefault
@@ -12,7 +13,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 
-# --- НАСТРОЙКИ ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ---
+# --- НАСТРОЙКИ ИЗ ПЕРЕМЕННЫХ ОКУЖЕНИЯ ---
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
 PORT = int(os.environ.get("PORT", 10000))
@@ -29,6 +30,9 @@ tracks_db = []
 recent_chats = {}   
 forward_map = {}    
 ai_mode_users = set() 
+
+# Хранилище контекста диалогов для бесплатного ИИ
+ai_history = {}  # Структура: {user_id: ["User: привет", "Assistant: привет", ...]}
 
 class AdminStates(StatesGroup):
     waiting_for_track_file = State()
@@ -82,7 +86,7 @@ async def set_bot_commands():
 async def start_cmd(message: Message):
     await set_bot_commands()
     if message.from_user.id == ADMIN_ID:
-        await message.answer("👋 Привет, админ! Твоя панель управления готова.", reply_markup=get_admin_kb())
+        await message.answer("👋 Привет, админ! Твоя panel управления готова.", reply_markup=get_admin_kb())
     else:
         users[message.from_user.id] = message.from_user.full_name
         recent_chats[message.from_user.id] = message.from_user.full_name
@@ -93,34 +97,38 @@ async def start_cmd(message: Message):
             parse_mode="HTML",
             reply_markup=get_user_kb()
         )
-import urllib.request
-import urllib.parse
-import json
 
-# --- ОБНОВЛЕННЫЙ БЕСПЛАТНЫЙ ИИ ЧЕРЕЗ POST-ЗАПРОС (СТАБИЛЬНЫЙ) ---
-async def ask_free_ai(prompt: str) -> str:
+# --- БЕСПЛАТНЫЙ ИИ С ПОДДЕРЖКОЙ КОНТЕКСТА (ПРИВЯЗКА К USER_ID) ---
+async def ask_free_ai(user_id: int, prompt: str) -> str:
     try:
+        # Инициализируем историю, если её нет
+        if user_id not in ai_history:
+            ai_history[user_id] = []
+            
+        # Добавляем новую реплику пользователя
+        ai_history[user_id].append(f"User: {prompt}")
+        
+        # Обрезаем историю до 10 последних сообщений, чтобы не перегружать буфер
+        if len(ai_history[user_id]) > 10:
+            ai_history[user_id] = ai_history[user_id][-10:]
+            
         def _fetch():
             url = "https://text.pollinations.ai/"
             
-            # Формируем правильное JSON-тело запроса со всей историей/инструкцией
-            payload = {
-                "messages": [
-                    {"role": "system", "content": "Ты — крутой ИИ-ассистент в боте IvanFuckenBot. Отвечай кратко, современно, используй сленг и пиши строго по делу."},
-                    {"role": "user", "content": prompt}
-                ],
-                "private": True
-            }
+            system_instruction = "System: Ты — крутой ИИ-ассистент в боте IvanFuckenBot. Отвечай кратко, современно, используй сленг и пиши строго по делу. Ты ведешь полноценный диалог и помнишь контекст сообщений выше."
             
-            # Кодируем данные в байты
-            data = json.dumps(payload).encode('utf-8')
+            # Собираем историю переписки в один текст
+            history_text = "\n".join(ai_history[user_id])
+            full_prompt = f"{system_instruction}\n{history_text}"
+            
+            data = full_prompt.encode('utf-8')
             
             req = urllib.request.Request(
                 url,
                 data=data,
                 headers={
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
-                    'Content-Type': 'application/json'
+                    'Content-Type': 'text/plain; charset=utf-8'
                 },
                 method='POST'
             )
@@ -128,21 +136,12 @@ async def ask_free_ai(prompt: str) -> str:
             with urllib.request.urlopen(req, timeout=15) as response:
                 return response.read().decode('utf-8')
 
-        # Запускаем в отдельном потоке
+        # Запускаем синхронный urllib-запрос в отдельном потоке
         reply = await asyncio.to_thread(_fetch)
-        if reply.strip():
-            return reply
-        return "⚠️ Не удалось получить ответ от ИИ. Попробуй еще раз!"
         
-    except Exception as e:
-        logger.error(f"Ошибка бесплатного ИИ: {e}")
-        return "⚠️ Не удалось подключиться к серверам нейросети. Попробуй через минутку!"
-
-
-        
-        # Выполняем синхронный urllib запрос в отдельном потоке, чтобы бот не фризился
-        reply = await asyncio.to_thread(_fetch)
         if reply.strip():
+            # Записываем ответ ИИ в память диалога
+            ai_history[user_id].append(f"Assistant: {reply}")
             return reply
         return "⚠️ Не удалось получить ответ от ИИ. Попробуй еще раз!"
         
@@ -159,11 +158,11 @@ async def grok_command(message: Message, state: FSMContext):
             await message.answer("Использование для админа: <code>/grok твой вопрос</code>", parse_mode="HTML")
             return
         msg = await message.answer("🔄 Нейросеть думает...")
-        reply = await ask_free_ai(prompt)
+        reply = await ask_free_ai(message.from_user.id, prompt)
         await msg.edit_text(reply)
     else:
         ai_mode_users.add(message.from_user.id)
-        await message.answer("🤖 <b>Режим общения с нейросетью активирован!</b>\n\nПиши мне любые вопросы, отвечу бесплатно.", parse_mode="HTML", reply_markup=get_exit_ai_kb())
+        await message.answer("🤖 <b>Режим общения с нейросетью активирован!</b>\n\nПиши мне любые вопросы, отвечу бесплатно и запомню контекст.", parse_mode="HTML", reply_markup=get_exit_ai_kb())
 
 @dp.callback_query(F.data == "grok_start")
 async def grok_start_callback(callback: CallbackQuery):
@@ -176,7 +175,10 @@ async def grok_stop_callback(callback: CallbackQuery):
     await callback.answer()
     if callback.from_user.id in ai_mode_users:
         ai_mode_users.remove(callback.from_user.id)
-    await callback.message.answer("❌ Режим ИИ выключен. Теперь твои сообщения снова отправляются админу.", reply_markup=get_user_kb())
+    # Очищаем контекст диалога пользователя при выходе из режима ИИ
+    if callback.from_user.id in ai_history:
+        del ai_history[callback.from_user.id]
+    await callback.message.answer("❌ Режим ИИ выключен. Контекст диалога сброшен.", reply_markup=get_user_kb())
 
 @dp.callback_query(F.data == "grok_admin")
 async def grok_admin_callback(callback: CallbackQuery):
@@ -346,7 +348,7 @@ async def chat_flow(message: Message):
     if message.from_user.id in ai_mode_users:
         if message.text:
             msg = await message.answer("🔄 Думаю...")
-            reply = await ask_free_ai(message.text)
+            reply = await ask_free_ai(message.from_user.id, message.text)
             await msg.edit_text(reply, reply_markup=get_exit_ai_kb())
         return
 
