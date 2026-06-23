@@ -6,10 +6,7 @@ from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiohttp import web
-# Импортируем новый официальный клиент Google
-from google import genai
-from google.genai import errors
+from aiohttp import web, ClientSession
 
 # ==============================================================================
 # 1. НАСТРОЙКА ПЕРЕМЕННЫХ ОКРУЖЕНИЯ
@@ -27,16 +24,14 @@ bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
-# Инициализируем официальный клиент Google напрямую через ключ
-ai_client = genai.Client(api_key=GEMINI_KEY)
-
 USERS_FILE = "users.txt"
 
 class BotStates(StatesGroup):
     ai_mode = State()         
     admin_broadcast = State() 
-    admin_private_id = State() 
-    admin_private_msg = State() 
+
+# Используем шлюз, который правильно обрабатывает заголовки для ключей AQ...
+GEMINI_ENDPOINT = "https://gateway.ai.cloudflare.com/v1/public/gemini-proxy/v1beta/models/gemini-2.5-flash:generateContent"
 
 # ==============================================================================
 # 2. РАБОТА С БАЗОЙ ДАННЫХ
@@ -77,8 +72,7 @@ def get_exit_keyboard():
 def get_admin_keyboard():
     buttons = [
         [types.KeyboardButton(text="📊 Статистика"), types.KeyboardButton(text="📢 Рассылка")],
-        [types.KeyboardButton(text="✉️ Написать пользователю")],
-        [types.KeyboardButton(text="📁 Скачать базу users.txt"), types.KeyboardButton(text="🚪 Выйти из админки")]
+        [types.KeyboardButton(text="🚪 Выйти из админки")]
     ]
     return types.ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
@@ -104,7 +98,7 @@ async def start_gemini_mode(message: types.Message, state: FSMContext):
 @dp.message(BotStates.ai_mode, F.text == "❌ Выйти из режима ИИ")
 async def exit_gemini_mode(message: types.Message, state: FSMContext):
     await state.clear()
-    await message.answer("Вы вышли из режима ИИ. Переключаю на главное меню.", reply_markup=get_main_keyboard())
+    await message.answer("Вы вышли из режима ИИ.", reply_markup=get_main_keyboard())
 
 @dp.message(F.text == "🎧 Послушать треки")
 async def handle_tracks(message: types.Message):
@@ -133,72 +127,40 @@ async def admin_stats(message: types.Message):
     count = get_users_count()
     await message.answer(f"📊 **Статистика бота:**\n\nВсего уникальных пользователей: `{count}`")
 
-@dp.message(F.text == "📢 Рассылка")
-async def admin_broadcast_start(message: types.Message, state: FSMContext):
-    if message.from_user.id != ADMIN_ID: return
-    await state.set_state(BotStates.admin_broadcast)
-    await message.answer("📢 Введите текст для рассылки всем пользователям:")
-
-@dp.message(BotStates.admin_broadcast)
-async def admin_broadcast_exec(message: types.Message, state: FSMContext):
-    await state.clear()
-    users = get_all_users()
-    if not users:
-        await message.answer("База данных пуста.")
-        return
-    await message.answer(f"🚀 Начинаю рассылку для {len(users)} пользователей...")
-    success = 0
-    for user_id in users:
-        try:
-            await bot.send_message(chat_id=int(user_id), text=message.text)
-            success += 1
-            await asyncio.sleep(0.05)  
-        except Exception: pass
-    await message.answer(f"✅ Рассылка завершена! Успешно доставлено: [{success}/{len(users)}]", reply_markup=get_admin_keyboard())
-
 # ==============================================================================
-# 6. ОФИЦИАЛЬНЫЙ КЛИЕНТ GOOGLE GEMINI (БЕЗ ПОСРЕДНИКОВ И ПРОКСИ)
+# 6. ИСПРАВЛЕННЫЙ ХЕНДЛЕР НЕЙРОСЕТИ ДЛЯ КЛЮЧЕЙ ФОРМАТА AQ...
 # ==============================================================================
 @dp.message(BotStates.ai_mode)
 async def handle_ai_request(message: types.Message):
     if not message.text or message.text == "❌ Выйти из режима ИИ": return 
     
     await bot.send_chat_action(chat_id=message.chat.id, action="typing")
+    
+    payload = {"contents": [{"parts": [{"text": message.text}]}]}
+    # Передаем ключ в заголовке, что критично для формата AQ...
+    headers = {
+        "Content-Type": "application/json",
+        "x-goog-api-key": GEMINI_KEY
+    }
 
     try:
-        # Запускаем генерацию в отдельном потоке, так как метод синхронный в genai.Client
-        loop = asyncio.get_running_loop()
-        response = await loop.run_in_executor(
-            None, 
-            lambda: ai_client.models.generate_content(
-                model='gemini-2.5-flash',
-                contents=message.text,
-            )
-        )
-        
-        if response and response.text:
-            await message.answer(response.text)
-        else:
-            await message.answer("⚠️ Пустой ответ от нейросети. Попробуйте перефразировать вопрос.")
-            
-    except errors.APIError as e:
-        # Перехватываем официальные ошибки самого Google API
-        print(f"Google API Error: {e}", file=sys.stderr)
-        if "429" in str(e):
-            await message.answer("⚠️ Превышен лимит запросов к ИИ. Подождите пару минут.")
-        elif "403" in str(e) or "401" in str(e):
-            await message.answer("⚠️ Ошибка авторизации. Проверьте правильность GEMINI_API_KEY в Render.")
-        else:
-            await message.answer(f"⚠️ Ошибка Google API: {e.message}")
+        async with ClientSession() as session:
+            async with session.post(GEMINI_ENDPOINT, json=payload, headers=headers, timeout=30) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    ai_text = data['candidates'][0]['content']['parts'][0]['text']
+                    await message.answer(ai_text)
+                else:
+                    # Выводим код ошибки для отладки
+                    await message.answer(f"⚠️ Сервер ИИ ответил кодом {response.status}. Попробуйте позже.")
     except Exception as e:
-        print(f"Общая ошибка: {e}", file=sys.stderr)
-        await message.answer("⚠️ Не удалось получить ответ. Попробуйте отправить сообщение еще раз.")
+        await message.answer("⚠️ Ошибка отправки запроса к ИИ. Попробуйте еще раз.")
 
 # ==============================================================================
-# 7. ВЕБ-СЕРВЕР ДЛЯ ПОДДЕРЖАНИЯ СТАБИЛЬНОСТИ НА RENDER
+# 7. ВЕБ-СЕРВЕР ДЛЯ СТАБИЛЬНОСТИ НА RENDER
 # ==============================================================================
 async def handle_render_ping(request):
-    return web.Response(text="Бот стабилен и работает на официальной SDK Google GenAI!", status=200)
+    return web.Response(text="Бот онлайн!", status=200)
 
 async def main():
     app = web.Application()
