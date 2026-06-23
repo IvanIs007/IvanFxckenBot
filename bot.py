@@ -12,12 +12,12 @@ from aiohttp import web, ClientSession
 # 1. НАСТРОЙКА ПЕРЕМЕННЫХ ОКРУЖЕНИЯ
 # ==============================================================================
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-OPENROUTER_KEY = os.environ.get("OPENROUTER_API_KEY")  # Поменяли переменную!
+OPENROUTER_KEY = os.environ.get("OPENROUTER_API_KEY")  
 PORT = int(os.environ.get("PORT", 10000))
 ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))  
 
 if not BOT_TOKEN or not OPENROUTER_KEY:
-    print("КРИТИЧЕСКАЯ ОШИБКА: Проверь TELEGRAM_BOT_TOKEN и OPENROUTER_API_KEY в Render!")
+    print("КРИТИЧЕСКАЯ ОШИБКА: Проверь TELEGRAM_BOT_TOKEN и OPENROUTER_API_KEY!")
     sys.exit(1)
 
 bot = Bot(token=BOT_TOKEN)
@@ -30,8 +30,15 @@ class BotStates(StatesGroup):
     ai_mode = State()         
     admin_broadcast = State() 
 
-# Эндпоинт OpenRouter
 OPENROUTER_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions"
+
+# Список доступных БЕСПЛАТНЫХ моделей для клавиатуры
+AVAILABLE_MODELS = {
+    "🤖 Автовыбор ИИ": "openrouter/free",
+    "🦙 Llama 4 (Free)": "meta-llama/llama-4-scout:free",
+    "🐉 Qwen 3 (Free)": "qwen/qwen3-next-80b-a3b-instruct:free",
+    "🧠 DeepSeek R1": "deepseek/deepseek-r1:free"
+}
 
 # ==============================================================================
 # 2. РАБОТА С БАЗОЙ ДАННЫХ
@@ -65,8 +72,13 @@ def get_main_keyboard():
     ]
     return types.ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
-def get_exit_keyboard():
-    buttons = [[types.KeyboardButton(text="❌ Выйти из режима ИИ")]]
+def get_ai_menu_keyboard():
+    # Кнопки выбора моделей + кнопка выхода
+    buttons = [
+        [types.KeyboardButton(text="🤖 Автовыбор ИИ"), types.KeyboardButton(text="🦙 Llama 4 (Free)")],
+        [types.KeyboardButton(text="🐉 Qwen 3 (Free)"), types.KeyboardButton(text="🧠 DeepSeek R1")],
+        [types.KeyboardButton(text="❌ Выйти из режима ИИ")]
+    ]
     return types.ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
 def get_admin_keyboard():
@@ -89,16 +101,33 @@ async def cmd_start(message: types.Message):
     )
     await message.answer(welcome_text, reply_markup=get_main_keyboard())
 
-@dp.message(Command("ai"))  # Заменили команду /gemini на /ai
+@dp.message(Command("ai"))
 @dp.message(F.text == "🤖 Общение с ИИ")
 async def start_ai_mode(message: types.Message, state: FSMContext):
     await state.set_state(BotStates.ai_mode)
-    await message.answer("🤖 Режим общения с нейросетью активирован!\n\nЗадавай свои вопросы:", reply_markup=get_exit_keyboard())
+    # По умолчанию ставим автовыбор бесплатной модели
+    await state.update_data(current_model="openrouter/free")
+    await message.answer(
+        "🤖 Режим нейросети активирован!\n\n"
+        "По умолчанию включен **Автовыбор ИИ** (система сама подберет свободную модель).\n"
+        "Вы можете изменить модель, нажав на кнопки ниже. Задавайте свой вопрос:", 
+        reply_markup=get_ai_menu_keyboard(),
+        parse_mode="Markdown"
+    )
 
 @dp.message(BotStates.ai_mode, F.text == "❌ Выйти из режима ИИ")
 async def exit_ai_mode(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer("Вы вышли из режима ИИ.", reply_markup=get_main_keyboard())
+
+# Хендлер для переключения моделей на лету
+@dp.message(BotStates.ai_mode, F.text.in_(AVAILABLE_MODELS.keys()))
+async def change_ai_model(message: types.Message, state: FSMContext):
+    selected_name = message.text
+    model_id = AVAILABLE_MODELS[selected_name]
+    
+    await state.update_data(current_model=model_id)
+    await message.answer(f"🔄 Переключил вас на модель: **{selected_name}**\nЖду ваш вопрос!", parse_mode="Markdown")
 
 @dp.message(F.text == "🎧 Послушать треки")
 async def handle_tracks(message: types.Message):
@@ -128,7 +157,7 @@ async def admin_stats(message: types.Message):
     await message.answer(f"📊 **Статистика бота:**\n\nВсего уникальных пользователей: `{count}`")
 
 # ==============================================================================
-# 6. ХЕНДЛЕР ДЛЯ РАБОТЫ С OPENROUTER API
+# 6. ХЕНДЛЕР ДЛЯ РАБОТЫ С OPENROUTER API (ДИНАМИЧЕСКИЙ ВЫБОР)
 # ==============================================================================
 @dp.message(BotStates.ai_mode)
 async def handle_ai_request(message: types.Message):
@@ -136,9 +165,14 @@ async def handle_ai_request(message: types.Message):
     
     await bot.send_chat_action(chat_id=message.chat.id, action="typing")
     
-  # Формируем стандартный Payload для OpenAI-совместимых API
+    # Получаем сохраненную для пользователя модель (или берем автовыбор)
+    user_data = await state.get_data() if 'state' in locals() else {}
+    # В aiogram 3 context передается аргументом, вытащим модель безопасно:
+    current_state_data = await Dispatcher.get_current().fsm.get_data(cast(types.User, message.from_user))
+    chosen_model = current_state_data.get("current_model", "openrouter/free")
+    
     payload = {
-        "model": "google/gemini-2.5-flash:free",  # Включили БЕСПЛАТНУЮ версию Gemini Flash
+        "model": chosen_model, 
         "messages": [
             {"role": "user", "content": message.text}
         ]
@@ -147,22 +181,21 @@ async def handle_ai_request(message: types.Message):
     headers = {
         "Authorization": f"Bearer {OPENROUTER_KEY}",
         "Content-Type": "application/json",
-        "HTTP-Referer": "https://render.com", # Обязательно для OpenRouter
+        "HTTP-Referer": "https://render.com", 
         "X-Title": "Telegram Bot" 
     }
 
     try:
         async with ClientSession() as session:
-            async with session.post(OPENROUTER_ENDPOINT, json=payload, headers=headers, timeout=30) as response:
+            async with session.post(OPENROUTER_ENDPOINT, json=payload, headers=headers, timeout=45) as response:
                 if response.status == 200:
                     data = await response.json()
                     ai_text = data['choices'][0]['message']['content']
                     await message.answer(ai_text)
                 else:
-                    # Логируем ошибку, если статус не 200
                     error_data = await response.text()
                     print(f"Ошибка OpenRouter API: {error_data}")
-                    await message.answer(f"⚠️ Ошибка нейросети (Код {response.status}). Попробуйте позже.")
+                    await message.answer(f"⚠️ Ошибка нейросети (Код {response.status}). Попробуйте сменить модель кнопками.")
     except Exception as e:
         print(f"Исключение при запросе: {e}")
         await message.answer("⚠️ Ошибка отправки запроса к ИИ. Попробуйте еще раз.")
