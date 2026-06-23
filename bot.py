@@ -10,10 +10,14 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 
+# Инициализация клиента Grok (через библиотеку openai)
+from openai import AsyncOpenAI
+
 # --- НАСТРОЙКИ ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ---
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
 PORT = int(os.environ.get("PORT", 10000))
+XAI_API_KEY = os.environ.get("XAI_API_KEY", "") # Твой ключ от Grok API
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -21,11 +25,15 @@ logger = logging.getLogger(__name__)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
+# Инициализируем клиент Grok, если ключ указан
+grok_client = AsyncOpenAI(api_key=XAI_API_KEY, base_url="https://api.x.ai/v1") if XAI_API_KEY else None
+
 # --- БАЗЫ ДАННЫХ В ПАМЯТИ ---
 users = {}          # {user_id: full_name}
 tracks_db = []      # [{"name": "...", "file_id": "..."}]
 recent_chats = {}   # {user_id: full_name}
 forward_map = {}    # {message_id_админа: chat_id_юзера}
+ai_mode_users = set() # Сет для ID пользователей, у которых включен ИИ-режим
 
 class AdminStates(StatesGroup):
     waiting_for_track_file = State()
@@ -39,13 +47,18 @@ def get_admin_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🎵 Треки", callback_data="manage_tracks"), InlineKeyboardButton(text="📢 Рассылка всем", callback_data="broadcast_start")],
         [InlineKeyboardButton(text="📝 Недавние диалоги", callback_data="recent_chats"), InlineKeyboardButton(text="➕ Новое ID", callback_data="direct_send_start")],
-        [InlineKeyboardButton(text="📊 Статистика", callback_data="view_stats"), InlineKeyboardButton(text="🎲 Кинуть кость", callback_data="dice")]
+        [InlineKeyboardButton(text="🤖 Спросить Grok", callback_data="grok_admin"), InlineKeyboardButton(text="🎲 Кинуть кость", callback_data="dice")]
     ])
 
 def get_user_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🎧 Послушать треки", callback_data="list_tracks")],
+        [InlineKeyboardButton(text="🎧 Послушать треки", callback_data="list_tracks"), InlineKeyboardButton(text="🤖 Общение с ИИ", callback_data="grok_start")],
         [InlineKeyboardButton(text="🎲 Кинуть кость", callback_data="dice")]
+    ])
+
+def get_exit_ai_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Выйти из режима ИИ", callback_data="grok_stop")]
     ])
 
 # --- РЕГИСТРАЦИЯ КОМАНД В МЕНЮ TELEGRAM ---
@@ -53,6 +66,7 @@ async def set_bot_commands():
     user_commands = [
         BotCommand(command="start", description="👋 Перезапустить бота"),
         BotCommand(command="tracks", description="🎧 Послушать треки IvanFucken"),
+        BotCommand(command="grok", description="🤖 Включить режим общения с ИИ"),
         BotCommand(command="dice", description="🎲 Сыграть в кости с ботом")
     ]
     admin_commands = [
@@ -61,6 +75,7 @@ async def set_bot_commands():
         BotCommand(command="tracks_control", description="🎵 Управление треками"),
         BotCommand(command="broadcast", description="📢 Сделать рассылку"),
         BotCommand(command="chats", description="📝 Недавние диалоги"),
+        BotCommand(command="grok", description="🤖 Быстрый вопрос к Grok ИИ"),
         BotCommand(command="dice", description="🎲 Кинуть кость")
     ]
     await bot.set_my_commands(user_commands, scope=BotCommandScopeDefault())
@@ -86,13 +101,66 @@ async def start_cmd(message: Message):
         users[message.from_user.id] = message.from_user.full_name
         recent_chats[message.from_user.id] = message.from_user.full_name
         await message.answer(
-            "✌️ Здарова! Я новый бот. Можешь послушать мои треки или рискнуть сыграть со мной в кости.\n\n"
-            "Ты можете использовать кнопки ниже или команды в меню: /tracks и /dice.\n"
-            "А если просто напишешь мне сообщение — его сразу прочитает админ!",
+            "✌️ Здарова! Я новый бот. Можешь послушать мои треки, рискнуть сыграть со мной в кости или "
+            "<b>пообщаться с искусственным интеллектом Grok</b>!\n\n"
+            "Используй кнопки ниже или команды в меню: /tracks, /grok и /dice.",
+            parse_mode="HTML",
             reply_markup=get_user_kb()
         )
 
-# --- АДМИНСКИЕ ФУНКЦИИ (КОМАНДЫ) ---
+# --- ЛОГИКА ВЗАИМОДЕЙСТВИЯ С GROK API ---
+async def ask_grok(prompt: str) -> str:
+    if not grok_client:
+        return "❌ Ошибка: Grok API не настроен на сервере (отсутствует XAI_API_KEY)."
+    try:
+        response = await grok_client.chat.completions.create(
+            model="grok-2-latest", # Или grok-beta / grok-2-mini в зависимости от доступности
+            messages=[
+                {"role": "system", "content": "Ты — крутой и полезный ИИ-ассистент в боте IvanFuckenBot. Отвечай кратко, емко и по делу."},
+                {"role": "user", "content": prompt}
+            ]
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        logger.error(f"Ошибка Grok API: {e}")
+        return f"⚠️ Произошла ошибка при запросе к нейросети. Попробуй позже."
+
+# --- КОМАНДЫ И CALLBACK ДЛЯ РЕЖИМА ИИ ---
+@dp.message(Command("grok"))
+async def grok_command(message: Message, state: FSMContext):
+    if message.from_user.id == ADMIN_ID:
+        # У админа команда работает как одиночный запрос (например: /grok сколько планет)
+        prompt = message.text.replace("/grok", "").strip()
+        if not prompt:
+            await message.answer("Использование для админа: <code>/grok твой вопрос</code>", parse_mode="HTML")
+            return
+        msg = await message.answer("🔄 Думаю...")
+        reply = await ask_grok(prompt)
+        await msg.edit_text(reply)
+    else:
+        # У юзера команда включает постоянный режим диалога
+        ai_mode_users.add(message.from_user.id)
+        await message.answer("🤖 <b>Режим общения с нейросетью Grok активирован!</b>\n\nПиши мне любые вопросы, я буду отвечать с помощью ИИ.", parse_mode="HTML", reply_markup=get_exit_ai_kb())
+
+@dp.callback_query(F.data == "grok_start")
+async def grok_start_callback(callback: CallbackQuery):
+    await callback.answer()
+    ai_mode_users.add(callback.from_user.id)
+    await callback.message.answer("🤖 <b>Режим общения с нейросетью Grok активирован!</b>\n\nЗадавай свои вопросы:", parse_mode="HTML", reply_markup=get_exit_ai_kb())
+
+@dp.callback_query(F.data == "grok_stop")
+async def grok_stop_callback(callback: CallbackQuery):
+    await callback.answer()
+    if callback.from_user.id in ai_mode_users:
+        ai_mode_users.remove(callback.from_user.id)
+    await callback.message.answer("❌ Режим ИИ выключен. Теперь твои сообщения снова отправляются админу.", reply_markup=get_user_kb())
+
+@dp.callback_query(F.data == "grok_admin")
+async def grok_admin_callback(callback: CallbackQuery):
+    await callback.answer()
+    await callback.message.answer("🤖 Чтобы спросить нейросеть Grok, используй команду:\n<code>/grok твой вопрос</code>", parse_mode="HTML")
+
+# --- ОСТАЛЬНЫЕ ЮЗЕРСКИЕ И АДМИНСКИЕ КОМАНДЫ ---
 @dp.message(Command("panel"), F.from_user.id == ADMIN_ID)
 async def panel_cmd(message: Message):
     await message.answer("⚙️ Панель управления IvanFuckenBot:", reply_markup=get_admin_kb())
@@ -117,7 +185,6 @@ async def chats_cmd(message: Message):
     kb_buttons = [[InlineKeyboardButton(text=f"👤 {name}", callback_data=f"chat_with:{uid}")] for uid, name in recent_chats.items()]
     await message.answer("📝 <b>Выбери пользователя из недавних для отправки сообщения:</b>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_buttons))
 
-# --- ЮЗЕРСКИЕ ФУНКЦИИ (КОМАНДЫ) ---
 @dp.message(Command("tracks"))
 async def user_tracks_cmd(message: Message):
     if not tracks_db:
@@ -143,42 +210,33 @@ async def user_dice_cmd(message: Message):
         result = "Ничья! 🤔 Я просто поддался."
     await bot.send_message(chat_id=chat_id, text=f"Твой результат: {u} 🎰 Мой результат: {b}\n\n{result}")
 
-
 # --- СИНХРОНИЗАЦИЯ КНОПОК С КОМАНДАМИ (CALLBACK HANDLERS) ---
-
 @dp.callback_query(F.data == "list_tracks")
 async def list_tracks_callback(callback: CallbackQuery):
     await callback.answer()
-    # Вызываем напрямую команду прослушивания треков
     await user_tracks_cmd(callback.message)
 
 @dp.callback_query(F.data == "dice")
 async def dice_callback(callback: CallbackQuery):
     await callback.answer()
-    # Вызываем напрямую команду игры в кости
     await user_dice_cmd(callback.message)
 
 @dp.callback_query(F.data == "manage_tracks")
 async def manage_tracks_callback(callback: CallbackQuery):
     await callback.answer()
-    # Вызываем админскую команду управления треками
     await tracks_control_cmd(callback.message)
 
 @dp.callback_query(F.data == "broadcast_start")
 async def broadcast_start_cb(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
-    # Вызываем админскую команду рассылки
     await broadcast_cmd(callback.message, state)
 
 @dp.callback_query(F.data == "recent_chats")
 async def show_recent_cb(callback: CallbackQuery):
     await callback.answer()
-    # Вызываем админскую команду вывода недавних диалогов
     await chats_cmd(callback.message)
 
-
-# --- ОСТАЛЬНАЯ ЛОГИКА И СЦЕНАРИИ ВВОДА ДАННЫХ ---
-
+# --- ОСТАЛЬНАЯ ЛОГИКА АДМИНКИ И СЦЕНАРИИ ВВОДА ---
 @dp.callback_query(F.data == "add_track")
 async def add_track_start(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
@@ -295,12 +353,25 @@ async def admin_reply(message: Message):
     else:
         await message.answer("⚠️ Бот не определил юзера по этому реплаю. Используй команду /chats для прямой отправки.")
 
-# --- АВТОМАТИЧЕСКИЙ ЧАТ (ПЕРЕСЫЛКА СООБЩЕНИЙ АДМИНУ) ---
+# --- ОБРАБОТКА ТЕКСТА ЮЗЕРОВ (ИИ ИЛИ ПЕРЕСЫЛКА АДМИНУ) ---
+# Хэндлер стоит в конце, чтобы не перехватывать команды и админ-действия
 @dp.message(F.chat.id != ADMIN_ID)
 async def chat_flow(message: Message):
+    # Регистрируем
     users[message.from_user.id] = message.from_user.full_name
     recent_chats[message.from_user.id] = message.from_user.full_name
     
+    # 1. Если у пользователя включен режим ИИ
+    if message.from_user.id in ai_mode_users:
+        if message.text:
+            msg = await message.answer("🔄 Думаю...")
+            reply = await ask_grok(message.text)
+            await msg.edit_text(reply, reply_markup=get_exit_ai_kb())
+        else:
+            await message.answer("🤖 Я умею обрабатывать только текстовые вопросы.", reply_markup=get_exit_ai_kb())
+        return
+
+    # 2. Обычный режим (пересылка админу)
     user = message.from_user
     username_part = f"@{user.username}" if user.username else "(нет юзернейма)"
     header = f"📨 <b>От: {user.full_name}</b> {username_part}\nID: <code>{user.id}</code>\n\n"
