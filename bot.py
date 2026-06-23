@@ -116,21 +116,7 @@ async def ask_free_ai(user_id: int, prompt: str) -> str:
     except Exception as e:
         logger.error(f"ИИ Ошибка: {e}")
         return "⚠️ Ошибка связи с нейросетью."               
-                    # Добавляем ответ модели в историю
-                    ai_history[user_id].append({"role": "model", "parts": [{"text": reply_text}]})
-                    return reply_text
-                else:
-                    logger.error(f"Ошибка API: {await response.text()}")
-                    return "⚠️ Ошибка связи с нейросетью."
-        
-    except Exception as e:
-        logger.error(f"Ошибка Gemini: {e}")
-        return "⚠️ Что-то пошло не так. Попробуй позже."
-
-        
-        # Формируем историю в формате Google Gemini API
-        ai_history[user_id].append({"role": "user", "parts": [{"text": prompt}]})
-        
+                
         # Системный промпт зашиваем прямо перед отправкой, чтобы модель знала роль
         system_instruction = "Ты крутой ИИ-ассистент IvanFuckenBot. Отвечай кратко, используй молодежный сленг, пиши только на русском и по делу."
         
