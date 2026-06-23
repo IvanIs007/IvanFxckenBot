@@ -1,13 +1,13 @@
 import os
 import sys
 import asyncio
-import urllib.parse
+import socket
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiohttp import web, ClientSession
+from aiohttp import web, ClientSession, TCPConnector
 
 # ==============================================================================
 # 1. ИНИЦИАЛИЗАЦИЯ И ПРОВЕРКА ПЕРЕМЕННЫХ
@@ -22,9 +22,6 @@ if not BOT_TOKEN or not GEMINI_KEY:
     print("КРИТИЧЕСКАЯ ОШИБКА: Проверь TELEGRAM_BOT_TOKEN и GEMINI_API_KEY в Environment Variables!")
     sys.exit(1)
 
-# Выведем в логи начало ключа для самопроверки (без полной утечки данных)
-print(f"Бот запущен. Проверка ключа Gemini (первые 6 символов): {GEMINI_KEY[:6]}...")
-
 bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
@@ -37,15 +34,8 @@ class BotStates(StatesGroup):
     admin_private_id = State() 
     admin_private_msg = State() 
 
-# Формируем оригинальный URL и безопасно кодируем его для прокси-серверов
-ORIGINAL_URL = f"https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key={GEMINI_KEY}"
-ENCODED_URL = urllib.parse.quote(ORIGINAL_URL, safe='')
-
-# Список независимых прокси-шлюзов для обхода блокировки 429
-PROXY_POOL = [
-    f"https://api.allorigins.win/raw?url={ENCODED_URL}",
-    f"https://corsproxy.io/?{urllib.parse.quote(ORIGINAL_URL)}"
-]
+# Напрямую к Google API (БЕЗ ПРОКСИ)
+GEMINI_URL = f"https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key={GEMINI_KEY}"
 
 # ==============================================================================
 # ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ (БАЗА ДАННЫХ В ТЕКСТОВОМ ФАЙЛЕ)
@@ -205,7 +195,7 @@ async def admin_download_db(message: types.Message):
         await message.answer("База еще не создана.")
 
 # ==============================================================================
-# 5. ХЕНДЛЕР ОБРАБОТКИ GEMINI С ЗАЩИЩЕННЫМ URL КОДИРОВАНИЕМ
+# 5. ХЕНДЛЕР ОБРАБОТКИ GEMINI ЧЕРЕЗ DIRECT IPv6 СЕТЬ
 # ==============================================================================
 @dp.message(BotStates.ai_mode)
 async def handle_ai_request(message: types.Message):
@@ -214,28 +204,31 @@ async def handle_ai_request(message: types.Message):
     
     payload = {"contents": [{"parts": [{"text": message.text}]}]}
 
-    for proxy_url in PROXY_POOL:
-        try:
-            async with ClientSession() as session:
-                async with session.post(proxy_url, json=payload, timeout=15) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        ai_text = data['candidates'][0]['content']['parts'][0]['text']
-                        await message.answer(ai_text)
-                        return
-                    else:
-                        print(f"Лог: Прокси вернул статус {response.status}. Пробуем альтернативный...", file=sys.stderr)
-        except Exception as e:
-            print(f"Лог: Ошибка подключения к прокси: {e}", file=sys.stderr)
-            continue
+    # Принудительно заставляем aiohttp использовать IPv6 адрес при обращении к Google
+    connector = TCPConnector(family=socket.AF_INET6)
 
-    await message.answer("⚠️ Сервер временного шлюза перегружен (429/401). Повторите попытку ввода через 15-30 секунд.")
+    try:
+        async with ClientSession(connector=connector) as session:
+            async with session.post(GEMINI_URL, json=payload, timeout=20) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    ai_text = data['candidates'][0]['content']['parts'][0]['text']
+                    await message.answer(ai_text)
+                elif response.status == 429:
+                    await message.answer("⚠️ Сервер занят. Пожалуйста, подождите минуту.")
+                elif response.status in [400, 401, 403]:
+                    await message.answer("⚠️ Неверный API-ключ Gemini в настройках хостинга!")
+                else:
+                    await message.answer(f"⚠️ Ошибка сети API: {response.status}")
+    except Exception as e:
+        print(f"Сбой IPv6 соединения: {e}", file=sys.stderr)
+        await message.answer("⚠️ Не удалось связаться с ИИ напрямую. Попробуйте еще раз через несколько секунд.")
 
 # ==============================================================================
 # 6. ВЕБ-СЕРВЕР И ЗАПУСК
 # ==============================================================================
 async def handle_render_ping(request):
-    return web.Response(text="Бот стабилен и защищен от ошибок компиляции!", status=200)
+    return web.Response(text="Бот стабилен, работает напрямую через IPv6!", status=200)
 
 async def main():
     app = web.Application()
