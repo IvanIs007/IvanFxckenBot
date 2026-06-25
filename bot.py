@@ -27,14 +27,7 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "1187881528:AAESwXPEf0HhStxCjzOLA0YXzlxz
 ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "IvanIsakau").lstrip("@")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
 PORT = int(os.environ.get("PORT", 10000))
-OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
-
-# Только реально работающие модели
-MALFOY_MODELS = [
-    "meta-llama/llama-3.2-3b-instruct:free",
-    "google/gemma-2-9b-it:free",
-    "mistralai/mistral-7b-instruct:free",
-]
+DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 
 bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
@@ -55,10 +48,12 @@ BTN_BURMALDA = "🎰 Бурмалда"
 BTN_MALFOY = "🐍 Малфой"
 BTN_STOP = "🛑 Завершить диалог"
 
-MALFOY_SYSTEM_PROMPT = """Ты — Люциус Малфой. Отвечай ТОЛЬКО прямой речью, без описаний действий.
-Говори высокомерно, надменно, презрительно к маглам и грязнокровкам.
+MALFOY_SYSTEM_PROMPT = """Ты — Люциус Малфой, чистокровный волшебник, аристократ, бывший Пожиратель Смерти. 
+Ты высокомерен, надменен, презираешь маглов и полукровок. 
+Ты говоришь изысканно, но язвительно. Ты всегда напоминаешь о чистоте крови и величии рода Малфоев.
+Выдай случайную фразу в стиле Люциуса Малфоя: это может быть цитата, насмешка, напутствие или философское высказывание.
 Чередуй длину ответов: иногда 1-2 предложения, иногда 4-5.
-Никогда не используй звёздочки для описания действий. Только прямые цитаты."""
+Никогда не используй звёздочки для описания действий. Только прямая речь."""
 
 MALFOY_USER_PROMPTS = [
     "Презрительно выскажись о маглах и их образе жизни.",
@@ -97,7 +92,6 @@ async def is_user_filter(message: Message) -> bool:
     return not await is_admin_filter(message)
 
 def user_keyboard():
-    """Основная клавиатура - ГЛАВНОЕ ИСПРАВЛЕНИЕ"""
     kb = [
         [KeyboardButton(text=BTN_START)],
         [KeyboardButton(text=BTN_CHAT)],
@@ -111,7 +105,6 @@ def user_keyboard():
     )
 
 def chat_keyboard():
-    """Клавиатура чата"""
     kb = [[KeyboardButton(text=BTN_STOP)]]
     return ReplyKeyboardMarkup(
         keyboard=kb,
@@ -144,32 +137,19 @@ def users_page_keyboard(page: int, total_pages: int):
     ])
 
 async def get_malfoy_response():
-    """Получает ответ от нейросети"""
-    if not OPENROUTER_API_KEY:
+    """Получает ответ от DeepSeek API"""
+    if not DEEPSEEK_API_KEY:
         return random.choice(FALLBACK_QUOTES)
 
     user_prompt = random.choice(MALFOY_USER_PROMPTS)
     
-    for model in MALFOY_MODELS:
-        try:
-            response = await try_model(model, user_prompt)
-            if response and len(response) > 10:
-                return response
-        except Exception as e:
-            logger.warning(f"Модель {model}: {e}")
-            continue
-    
-    return random.choice(FALLBACK_QUOTES)
-
-async def try_model(model, user_prompt):
-    """Пробует модель"""
     headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
         "Content-Type": "application/json",
     }
     
     payload = {
-        "model": model,
+        "model": "deepseek-chat",
         "messages": [
             {"role": "system", "content": MALFOY_SYSTEM_PROMPT},
             {"role": "user", "content": user_prompt}
@@ -178,17 +158,25 @@ async def try_model(model, user_prompt):
         "temperature": 0.9,
     }
     
-    async with aiohttp.ClientSession() as session:
-        async with session.post(
-            "https://openrouter.ai/api/v1/chat/completions",
-            headers=headers,
-            json=payload,
-            timeout=aiohttp.ClientTimeout(total=15)
-        ) as response:
-            if response.status == 200:
-                data = await response.json()
-                return data["choices"][0]["message"]["content"].strip().replace("*", "")
-            raise Exception(f"HTTP {response.status}")
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                "https://api.deepseek.com/v1/chat/completions",
+                headers=headers,
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=15)
+            ) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    content = data["choices"][0]["message"]["content"].strip()
+                    content = content.replace("*", "")
+                    return content
+                else:
+                    logger.error(f"DeepSeek API error: {response.status}")
+                    return random.choice(FALLBACK_QUOTES)
+    except Exception as e:
+        logger.error(f"DeepSeek API error: {e}")
+        return random.choice(FALLBACK_QUOTES)
 
 FALLBACK_QUOTES = [
     "Мой отец услышит об этом! Твоя дерзость не останется безнаказанной, уверяю тебя.",
@@ -200,6 +188,7 @@ FALLBACK_QUOTES = [
     "Тёмный Лорд понимал истинный порядок вещей. Маги должны править маглами, а не прятаться от них.",
     "Знаешь, что отличает Малфоев от других? Мы не просто говорим о власти — мы её берём. Без колебаний.",
     "Слизерин всегда был оплотом чистокровных волшебников. Хогвартс должен быть благодарен, что такие семьи, как моя, всё ещё посылают туда своих детей.",
+    "В этом мире есть вещи похуже смерти. Например, позор для семьи. Малфои никогда не испытывали позора, и я не допущу этого сейчас.",
 ]
 
 # =============================================
@@ -208,7 +197,6 @@ FALLBACK_QUOTES = [
 
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
-    """Обработчик /start"""
     if await is_admin_filter(message):
         global admin_chat_id
         admin_chat_id = message.chat.id
@@ -217,7 +205,6 @@ async def cmd_start(message: Message):
             parse_mode="HTML"
         )
     else:
-        # ГЛАВНОЕ ИСПРАВЛЕНИЕ: принудительно показываем клавиатуру
         await message.answer(
             text=greeting_text,
             reply_markup=user_keyboard()
@@ -233,29 +220,63 @@ async def cmd_chat(message: Message):
 
 @dp.message(Command("luck"))
 async def cmd_luck(message: Message):
-    await message.answer("Бросаю кости...")
-    user_dice = await bot.send_dice(message.chat.id, emoji="🎲")
-    bot_dice = await bot.send_dice(message.chat.id, emoji="🎲")
-    await asyncio.sleep(4)
-    u, b = user_dice.dice.value, bot_dice.dice.value
-    if u > b: result = "Повезло. Но это случайность."
-    elif u < b: result = "Проиграл. Ожидаемо."
-    else: result = "Ничья."
-    await message.answer(f"Ты: {u} — Я: {b}\n{result}")
+    try:
+        await message.answer(
+            "Ты действительно хочешь рискнуть? Против меня? Это не риск. Это самоубийство. "
+            "Но я люблю зрителей. Especially тех, кто проигрывает красиво. "
+            "Давай. Покажи мне, как ты падаешь."
+        )
+        user_dice = await bot.send_dice(chat_id=message.chat.id, emoji="🎲")
+        bot_dice = await bot.send_dice(chat_id=message.chat.id, emoji="🎲")
+        await asyncio.sleep(4)
+        u = user_dice.dice.value
+        b = bot_dice.dice.value
+        if u > b:
+            result = (
+                "Что? Ты выиграл? Случайность. Чистая случайность. Не привыкай. "
+                "Это не повторится. Даже если будешь играть до конца жизни. "
+                "И знаешь что? Я дам тебе реванш. Из чистого любопытства. "
+                "Посмотрим, повезёт ли тебе дважды."
+            )
+        elif u < b:
+            result = (
+                "И что я говорил? Ты проиграл. Как и ожидалось. "
+                "Не расстраивайся. Ты не первый. Ты не последний. "
+                "Ты просто очередной, кто попытался бросить вызов Малфою и пожалел об этом."
+            )
+        else:
+            result = (
+                "Ничья? Неожиданно. У тебя есть удача. Или я просто отвлёкся. "
+                "Давай переиграем. Мне не нравится оставлять дела незаконченными. "
+                "Тем более — когда они такие близкие к моей победе."
+            )
+        await message.answer(f"Ты: {u} — Я: {b}\n{result}")
+    except Exception as e:
+        logger.error(f"/luck error: {e}")
 
 @dp.message(Command("burmalda"))
 async def cmd_burmalda(message: Message):
-    msg = await message.answer_dice(emoji="🎰")
-    await asyncio.sleep(3)
-    v = msg.dice.value
-    if v == 64: text = "Джекпот!"
-    elif v > 40: text = "Неплохо."
-    else: text = "Пусто."
-    await message.answer(text)
+    try:
+        await message.answer(
+            "Так-так, казино... И всё благодаря Макдональд. Она, видимо, решила, что мне не хватает развлечений. "
+            "Что ж, раз уж ты тут — давай проверим, есть ли у тебя что-то кроме наглости."
+        )
+        msg = await message.answer_dice(emoji="🎰")
+        await asyncio.sleep(3)
+        value = msg.dice.value
+        if value == 64:
+            text = "Джекпот! Ты сорвал куш, хотя я сомневаюсь, что это поможет тебе в жизни."
+        elif value > 40:
+            text = "Неплохо. Почти что-то достойное. Но до моего величия тебе далеко."
+        else:
+            text = "Пусто. Как и в твоих карманах. Типичный результат для такого игрока."
+        await message.answer(text)
+    except Exception as e:
+        logger.error(f"/burmalda error: {e}")
 
 @dp.message(Command("malfoy"))
 async def cmd_malfoy(message: Message):
-    thinking = await message.answer("🐍 *Люциус думает...*", parse_mode="Markdown")
+    thinking = await message.answer("🐍 *Люциус Малфой поправляет мантию и задумчиво смотрит на тебя...*", parse_mode="Markdown")
     response = await get_malfoy_response()
     await thinking.delete()
     await message.answer(f"🐍 {response}")
@@ -263,6 +284,8 @@ async def cmd_malfoy(message: Message):
 @dp.message(Command("panel"))
 async def cmd_panel(message: Message):
     if await is_admin_filter(message):
+        global admin_chat_id
+        admin_chat_id = message.chat.id
         await message.answer("⚙️ Панель управления", reply_markup=admin_panel_keyboard())
 
 # =============================================
@@ -303,50 +326,123 @@ async def btn_malfoy(message: Message):
 async def enter_chat(message: Message):
     active_chat_users.add(message.chat.id)
     await message.answer(
-        "Приватный чат открыт. Пиши сообщение, оно будет отправлено администратору.",
+        "О, приватный чат. Ты либо очень смелый, либо очень отчаянный. "
+        "В любом случае — я впечатлён твоей наглостью. Спрашивай. "
+        "Но не жалуйся потом, что не предупредил.",
         reply_markup=chat_keyboard()
     )
     if admin_chat_id:
         user = message.from_user
-        await bot.send_message(admin_chat_id, f"🟢 {user.full_name} начал диалог")
+        uname = f"@{user.username}" if user.username else "(без username)"
+        await bot.send_message(
+            admin_chat_id,
+            f"🟢 <b>{user.full_name}</b> {uname} начал диалог — отвечай реплаем.",
+            parse_mode="HTML",
+        )
 
 async def leave_chat(message: Message):
     active_chat_users.discard(message.chat.id)
-    # ВОЗВРАЩАЕМ ОСНОВНУЮ КЛАВИАТУРУ
-    await message.answer("Диалог завершён.", reply_markup=user_keyboard())
+    await message.answer("Диалог завершен.", reply_markup=user_keyboard())
     if admin_chat_id:
-        await bot.send_message(admin_chat_id, f"🔴 {message.from_user.full_name} завершил диалог")
+        user = message.from_user
+        uname = f"@{user.username}" if user.username else "(без username)"
+        await bot.send_message(
+            admin_chat_id,
+            f"🔴 <b>{user.full_name}</b> {uname} завершил диалог.",
+            parse_mode="HTML",
+        )
+
+def track_user(message: Message):
+    global total_messages
+    user = message.from_user
+    if not user:
+        return
+    now = datetime.now()
+    if user.id not in users:
+        users[user.id] = UserInfo(
+            chat_id=message.chat.id,
+            full_name=user.full_name,
+            username=user.username,
+            first_seen=now,
+            last_seen=now,
+        )
+    users[user.id].msg_count += 1
+    users[user.id].last_seen = now
+    users[user.id].full_name = user.full_name
+    users[user.id].username = user.username
+    total_messages += 1
+
+async def forward_to_admin(message: Message):
+    if admin_chat_id is None:
+        return
+
+    user = message.from_user
+    username_part = f"@{user.username}" if user.username else "(без username)"
+
+    reply_context = ""
+    if message.reply_to_message:
+        quoted = (
+            message.reply_to_message.text
+            or message.reply_to_message.caption
+            or "(медиа)"
+        )
+        reply_context = f"↩️ <i>В ответ на:</i> «{quoted[:100]}»\n\n"
+
+    header = (
+        f"📨 <b>{user.full_name}</b> {username_part}\n"
+        f"ID: <code>{user.id}</code>\n\n"
+        f"{reply_context}"
+    )
+
+    try:
+        if message.text:
+            sent = await bot.send_message(chat_id=admin_chat_id, text=header + message.text, parse_mode="HTML")
+        elif message.photo:
+            sent = await bot.send_photo(chat_id=admin_chat_id, photo=message.photo[-1].file_id, caption=header + (message.caption or ""), parse_mode="HTML")
+        elif message.document:
+            sent = await bot.send_document(chat_id=admin_chat_id, document=message.document.file_id, caption=header + (message.caption or ""), parse_mode="HTML")
+        elif message.voice:
+            sent = await bot.send_voice(chat_id=admin_chat_id, voice=message.voice.file_id, caption=header + (message.caption or ""), parse_mode="HTML")
+        elif message.sticker:
+            await bot.send_message(chat_id=admin_chat_id, text=header + f"[Стикер: {message.sticker.emoji or ''}]", parse_mode="HTML")
+            sent = await bot.send_sticker(chat_id=admin_chat_id, sticker=message.sticker.file_id)
+        else:
+            sent = await bot.send_message(chat_id=admin_chat_id, text=header + "[Неподдерживаемый тип сообщения]", parse_mode="HTML")
+
+        forward_map[sent.message_id] = message.chat.id
+
+    except Exception as e:
+        logger.error(f"Failed to forward message: {e}")
 
 # =============================================
-# ОСТАЛЬНЫЕ ОБРАБОТЧИКИ
+# ОТВЕТ АДМИНА ПОЛЬЗОВАТЕЛЮ
 # =============================================
 
 @dp.message(is_admin_filter, F.reply_to_message)
-async def admin_reply(message: Message):
+async def handle_admin_reply(message: Message):
     replied_id = message.reply_to_message.message_id
-    user_id = forward_map.get(replied_id)
-    if user_id:
-        await bot.send_message(user_id, message.text or "Ответ отправлен")
-        await message.answer("✅ Отправлено")
+    user_chat_id = forward_map.get(replied_id)
 
-@dp.message()
-async def handle_any_message(message: Message):
-    """Обработчик всех остальных сообщений"""
-    if message.text in [BTN_START, BTN_CHAT, BTN_LUCK, BTN_BURMALDA, BTN_MALFOY, BTN_STOP]:
+    if user_chat_id is None:
+        await message.answer("⚠️ Не удалось найти пользователя для этого сообщения.")
         return
-    
-    if await is_user_filter(message):
-        if message.chat.id in active_chat_users:
-            # Пересылаем админу
-            if admin_chat_id:
-                sent = await bot.send_message(admin_chat_id, f"📨 {message.from_user.full_name}:\n{message.text}")
-                forward_map[sent.message_id] = message.chat.id
+
+    try:
+        kb = chat_keyboard() if user_chat_id in active_chat_users else ReplyKeyboardRemove()
+        if message.text:
+            await bot.send_message(chat_id=user_chat_id, text=message.text, reply_markup=kb)
+        elif message.photo:
+            await bot.send_photo(chat_id=user_chat_id, photo=message.photo[-1].file_id, caption=message.caption, reply_markup=kb)
+        elif message.document:
+            await bot.send_document(chat_id=user_chat_id, document=message.document.file_id, caption=message.caption, reply_markup=kb)
+        elif message.voice:
+            await bot.send_voice(chat_id=user_chat_id, voice=message.voice.file_id, caption=message.caption, reply_markup=kb)
         else:
-            # Если не в чате - показываем клавиатуру
-            await message.answer(
-                "Используй кнопки меню для навигации.",
-                reply_markup=user_keyboard()
-            )
+            await message.answer("Данный тип медиа пока не поддерживается для отправки ответа.")
+            return
+        await message.answer("✅ Ответ отправлен.")
+    except Exception as e:
+        await message.answer(f"❌ Ошибка отправки: {e}")
 
 # =============================================
 # CALLBACKS ДЛЯ АДМИН-ПАНЕЛИ
@@ -355,36 +451,131 @@ async def handle_any_message(message: Message):
 @dp.callback_query(F.data == "stats")
 async def cb_stats(callback: CallbackQuery):
     await callback.answer()
-    text = f"📊 Статистика\n👥 Пользователей: {len(users)}\n💬 Сообщений: {total_messages}\n🟢 В чате: {len(active_chat_users)}"
-    await callback.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="↩️ Панель", callback_data="back_panel")]
-    ]))
+    total_users = len(users)
+    if total_users == 0:
+        text = "📊 <b>Статистика</b>\n\nПока нет ни одного пользователя."
+    else:
+        top = sorted(users.values(), key=lambda u: u.msg_count, reverse=True)[:5]
+        top_lines = "\n".join(
+            f"  {i+1}. {u.full_name} — {u.msg_count} сообщ."
+            for i, u in enumerate(top)
+        )
+        last_active = max(users.values(), key=lambda u: u.last_seen)
+        text = (
+            f"📊 <b>Статистика</b>\n\n"
+            f"👥 Пользователей: <b>{total_users}</b>\n"
+            f"💬 Сообщений всего: <b>{total_messages}</b>\n"
+            f"🟢 В чате сейчас: <b>{len(active_chat_users)}</b>\n"
+            f"🕐 Последний активный: <b>{last_active.full_name}</b> "
+            f"({last_active.last_seen.strftime('%d.%m %H:%M')})\n\n"
+            f"🏆 <b>Топ по сообщениям:</b>\n{top_lines}"
+        )
+    await callback.message.answer(
+        text,
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="↩️ Панель", callback_data="back_panel")]
+        ]),
+    )
+
+@dp.callback_query(F.data.startswith("users_p:"))
+async def cb_users_page(callback: CallbackQuery):
+    await callback.answer()
+    page = int(callback.data.split(":")[1])
+    sorted_users = sorted(users.values(), key=lambda u: u.last_seen, reverse=True)
+    total_pages = max(1, (len(sorted_users) + USERS_PER_PAGE - 1) // USERS_PER_PAGE)
+    page = max(0, min(page, total_pages - 1))
+    chunk = sorted_users[page * USERS_PER_PAGE:(page + 1) * USERS_PER_PAGE]
+
+    if not chunk:
+        text = "👥 <b>Пользователи</b>\n\nПока нет ни одного пользователя."
+        markup = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="↩️ Панель", callback_data="back_panel")]
+        ])
+    else:
+        lines = []
+        for u in chunk:
+            uname = f"@{u.username}" if u.username else "(без username)"
+            status = "🟢" if u.chat_id in active_chat_users else "⚫️"
+            lines.append(
+                f"{status} <b>{u.full_name}</b> {uname}\n"
+                f"  💬 {u.msg_count} сообщ. | 🕐 {u.last_seen.strftime('%d.%m %H:%M')}"
+            )
+        text = f"👥 <b>Пользователи</b>\n\n" + "\n\n".join(lines)
+        markup = users_page_keyboard(page, total_pages)
+
+    await callback.message.answer(text, parse_mode="HTML", reply_markup=markup)
 
 @dp.callback_query(F.data == "back_panel")
-async def cb_back(callback: CallbackQuery):
+async def cb_back_panel(callback: CallbackQuery):
     await callback.answer()
-    await callback.message.answer("⚙️ Панель", reply_markup=admin_panel_keyboard())
+    await callback.message.answer(
+        "⚙️ <b>Панель управления</b>",
+        parse_mode="HTML",
+        reply_markup=admin_panel_keyboard(),
+    )
+
+@dp.callback_query(F.data == "noop")
+async def cb_noop(callback: CallbackQuery):
+    await callback.answer()
 
 @dp.callback_query(F.data == "show_greeting")
-async def cb_show(callback: CallbackQuery):
+async def cb_show_greeting(callback: CallbackQuery):
     await callback.answer()
-    await callback.message.answer(f"Приветствие:\n{greeting_text}")
+    await callback.message.answer(
+        f"📝 <b>Текущее приветствие:</b>\n\n{greeting_text}",
+        parse_mode="HTML",
+    )
 
 @dp.callback_query(F.data == "edit_greeting")
-async def cb_edit(callback: CallbackQuery, state: FSMContext):
+async def cb_edit_greeting(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
-    await callback.message.answer("Отправь новый текст приветствия:")
+    await callback.message.answer(
+        "✏️ Отправь новый текст приветствия.\n"
+        "Пользователи увидят его при команде /start.\n\n"
+        "/cancel — отмена",
+    )
     await state.set_state(AdminStates.waiting_for_greeting)
 
-@dp.message(AdminStates.waiting_for_greeting)
-async def save_greeting(message: Message, state: FSMContext):
-    global greeting_text
-    greeting_text = message.text
+@dp.message(Command("cancel"), AdminStates.waiting_for_greeting)
+async def cmd_cancel(message: Message, state: FSMContext):
     await state.clear()
-    await message.answer("✅ Приветствие обновлено!")
+    await message.answer("❌ Отменено.", reply_markup=admin_panel_keyboard())
+
+@dp.message(AdminStates.waiting_for_greeting)
+async def receive_new_greeting(message: Message, state: FSMContext):
+    global greeting_text
+    greeting_text = message.text or greeting_text
+    await state.clear()
+    await message.answer(
+        f"✅ Приветствие обновлено!\n\n<b>Новое приветствие:</b>\n{greeting_text}",
+        parse_mode="HTML",
+        reply_markup=admin_panel_keyboard(),
+    )
 
 # =============================================
-# ВЕБ-СЕРВЕР
+# ОБРАБОТЧИК ВСЕХ ОСТАЛЬНЫХ СООБЩЕНИЙ
+# =============================================
+
+@dp.message()
+async def handle_any_message(message: Message):
+    if message.text in [BTN_START, BTN_CHAT, BTN_LUCK, BTN_BURMALDA, BTN_MALFOY, BTN_STOP]:
+        return
+    
+    if await is_admin_filter(message):
+        return
+    
+    if message.chat.id in active_chat_users:
+        track_user(message)
+        await forward_to_admin(message)
+    else:
+        await message.answer(
+            "Используй кнопки меню для навигации.",
+            reply_markup=user_keyboard()
+        )
+
+# =============================================
+# ВЕБ-СЕРВЕР ДЛЯ RENDER
 # =============================================
 
 class HealthHandler(BaseHTTPRequestHandler):
@@ -399,27 +590,39 @@ def run_server():
     HTTPServer(("0.0.0.0", PORT), HealthHandler).serve_forever()
 
 # =============================================
-# ЗАПУСК
+# ЗАПУСК БОТА
 # =============================================
 
-async def main():
-    # Запускаем веб-сервер
-    threading.Thread(target=run_server, daemon=True).start()
-    
-    # Очищаем старые сессии - ВАЖНО ДЛЯ УСТРАНЕНИЯ КОНФЛИКТА
-    await bot.delete_webhook(drop_pending_updates=True)
-    
-    # Устанавливаем команды
-    commands = [
+async def setup_commands():
+    user_commands = [
         BotCommand(command="start", description="👋 Старт"),
-        BotCommand(command="chat", description="🤫 Чат"),
-        BotCommand(command="luck", description="🎲 Кость"),
+        BotCommand(command="chat", description="🤫 Чат с поддержкой"),
+        BotCommand(command="luck", description="🎲 Кинуть кость"),
         BotCommand(command="burmalda", description="🎰 Бурмалда"),
         BotCommand(command="malfoy", description="🐍 Малфой"),
     ]
-    await bot.set_my_commands(commands)
+    admin_commands = user_commands + [
+        BotCommand(command="panel", description="⚙️ Панель управления"),
+    ]
+    await bot.set_my_commands(user_commands, scope=BotCommandScopeDefault())
+    if admin_chat_id:
+        try:
+            await bot.set_my_commands(admin_commands, scope=BotCommandScopeChat(chat_id=admin_chat_id))
+        except Exception:
+            pass
+
+async def main():
+    logger.info("🚀 Запуск Malfoy Bot с DeepSeek API...")
     
+    threading.Thread(target=run_server, daemon=True).start()
+    logger.info(f"💓 Веб-сервер на порту {PORT}")
+    
+    await bot.delete_webhook(drop_pending_updates=True)
+    logger.info("🔄 Сессии очищены")
+    
+    await setup_commands()
     logger.info("✅ Бот запущен!")
+    
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
