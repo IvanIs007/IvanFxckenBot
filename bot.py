@@ -29,46 +29,97 @@ ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
 PORT = int(os.environ.get("PORT", 10000))
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 
-# Список лучших моделей для роли Малфоя (в порядке приоритета)
+# Лучшие модели для Малфоя (будем пробовать по очереди)
 MALFOY_MODELS = [
-    "google/gemma-2-27b-it:free",      # Google Gemma 2 27B - очень умная
-    "google/gemma-2-9b-it:free",       # Google Gemma 2 9B - быстрая
-    "meta-llama/llama-3.2-3b-instruct:free",  # Meta Llama 3.2 3B
-    "meta-llama/llama-3.1-8b-instruct:free",  # Meta Llama 3.1 8B
-    "mistralai/mistral-7b-instruct:free",     # Mistral 7B
-    "nvidia/llama-3.1-nemotron-70b-instruct:free", # Nvidia Nemotron 70B - очень мощная
-    "qwen/qwen-2-7b-instruct:free",     # Qwen 2 7B
-    "deepseek/deepseek-chat:free",      # DeepSeek Chat
+    "nvidia/llama-3.1-nemotron-70b-instruct:free",
+    "google/gemma-2-27b-it:free",
+    "meta-llama/llama-3.1-8b-instruct:free",
+    "google/gemma-2-9b-it:free",
+    "mistralai/mistral-7b-instruct:free",
 ]
-
-logger.info(f"🔑 BOT_TOKEN: {BOT_TOKEN[:15]}...")
-logger.info(f"👑 ADMIN: @{ADMIN_USERNAME}")
-logger.info(f"🌐 PORT: {PORT}")
-logger.info(f"🤖 Доступно моделей: {len(MALFOY_MODELS)}")
 
 bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
-greeting_text: str = "Ух ты, новенький! Обычно люди убегают после первого поста. Ты либо очень смелый, либо очень наивный. В любом случае — добро пожаловать в мой театр абсурда. Я здесь главный актёр. Ты — зритель. Аплодируй, когда я скажу."
+greeting_text = (
+    "Ух ты, новенький! Обычно люди убегают после первого поста. "
+    "Ты либо очень смелый, либо очень наивный. "
+    "В любом случае — добро пожаловать в мой театр абсурда. "
+    "Я здесь главный актёр. Ты — зритель. Аплодируй, когда я скажу."
+)
+
 forward_map: dict[int, int] = {}
 admin_chat_id: int | None = ADMIN_ID if ADMIN_ID != 0 else None
 active_chat_users: set[int] = set()
 
 USERS_PER_PAGE = 10
 
-BTN_START     = "👋 Старт"
-BTN_CHAT      = "🤫 Чат с поддержкой"
-BTN_LUCK      = "🎲 Кинуть кость"
-BTN_BURMALDA  = "🎰 Бурмалда"
-BTN_MALFOY    = "🐍 Малфой"
-BTN_STOP      = "🛑 Завершить диалог"
+# Кнопки
+BTN_START = "👋 Старт"
+BTN_CHAT = "🤫 Чат с поддержкой"
+BTN_LUCK = "🎲 Кинуть кость"
+BTN_BURMALDA = "🎰 Бурмалда"
+BTN_MALFOY = "🐍 Малфой"
+BTN_STOP = "🛑 Завершить диалог"
 
-MALFOY_PROMPT = """Ты — Люциус Малфой, чистокровный волшебник, аристократ, бывший Пожиратель Смерти. 
-Ты высокомерен, надменен, презираешь маглов и полукровок. 
-Ты говоришь изысканно, но язвительно. Ты всегда напоминаешь о чистоте крови и величии рода Малфоев.
-Выдай случайную фразу в стиле Люциуса Малфоя: это может быть цитата, насмешка, напутствие или философское высказывание.
-Ответ должен быть на русском языке, от 1 до 3 предложений. Только прямая речь, без описаний."""
+# Улучшенный промпт для разнообразных ответов
+MALFOY_SYSTEM_PROMPT = """Ты — Люциус Малфой, чистокровный волшебник, аристократ, бывший Пожиратель Смерти.
+
+ТВОЙ ХАРАКТЕР:
+- Высокомерный, надменный, презираешь маглов, грязнокровок и полукровок
+- Говоришь изысканно, но язвительно и презрительно
+- Постоянно напоминаешь о чистоте крови, богатстве и величии рода Малфоев
+- Считаешь себя выше всех остальных
+- Часто упоминаешь своего сына Драко, поместье Малфой-мэнор, Министерство магии
+- Любишь угрожать связями и влиянием
+
+СТИЛЬ ОТВЕТА:
+- От 1 до 5 предложений
+- Можешь использовать как короткие высокомерные фразы, так и развёрнутые надменные монологи
+- Чередуй длину ответов: иногда коротко и резко, иногда развёрнуто и пафосно
+- Используй обращения: "магл", "грязнокровка", "жалкий человек", "ничтожество"
+- Добавляй детали о волшебном мире, заклинаниях, артефактах
+- Иногда вспоминай прошлое, Тёмного Лорда, войну
+- Будь театральным и драматичным
+
+ТЕМЫ ДЛЯ РАЗНООБРАЗИЯ (выбирай случайно):
+- Чистота крови и превосходство волшебников
+- Богатство и влияние семьи Малфоев
+- Воспитание сына Драко
+- Политика Министерства магии
+- Прошлые времена и Тёмный Лорд
+- Презрение к маглам и их технологиям
+- Магические артефакты и заклинания
+- Угрозы и предупреждения
+- Философские размышления о власти
+- Воспоминания о Хогвартсе и Слизерине
+
+ОТВЕЧАЙ ТОЛЬКО ПРЯМОЙ РЕЧЬЮ, БЕЗ ОПИСАНИЙ ДЕЙСТВИЙ."""
+
+# Разные формулировки запроса для разнообразия
+MALFOY_USER_PROMPTS = [
+    "Скажи что-нибудь презрительное о маглах и их технологиях.",
+    "Расскажи о величии рода Малфоев.",
+    "Дай надменное напутствие молодому волшебнику.",
+    "Выскажись о чистоте крови.",
+    "Пригрози кому-нибудь своим влиянием в Министерстве магии.",
+    "Вспомни что-нибудь о Тёмном Лорде.",
+    "Расскажи о своём поместье и богатстве.",
+    "Дай совет по воспитанию наследника.",
+    "Вырази презрение к грязнокровкам.",
+    "Поделись мудростью о власти и влиянии.",
+    "Сравни магический мир с магловским.",
+    "Расскажи о важности связей в обществе волшебников.",
+    "Выскажись о политике Министерства магии.",
+    "Дай характеристику другим чистокровным семьям.",
+    "Расскажи о своём сыне Драко.",
+    "Прокомментируй современное состояние магического мира.",
+    "Вырази мнение о Хогвартсе и его преподавателях.",
+    "Расскажи о каком-нибудь магическом артефакте.",
+    "Дай совет о том, как держать слуг в страхе.",
+    "Поделись секретом успеха семьи Малфоев."
+]
 
 @dataclass
 class UserInfo:
@@ -94,6 +145,7 @@ async def is_user_filter(message: Message) -> bool:
     return not await is_admin_filter(message)
 
 def user_keyboard() -> ReplyKeyboardMarkup:
+    """Основная клавиатура пользователя"""
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text=BTN_START)],
@@ -102,15 +154,18 @@ def user_keyboard() -> ReplyKeyboardMarkup:
             [KeyboardButton(text=BTN_MALFOY)],
         ],
         resize_keyboard=True,
+        one_time_keyboard=False,
         input_field_placeholder="Выбери действие...",
     )
 
 def chat_keyboard() -> ReplyKeyboardMarkup:
+    """Клавиатура для режима чата с поддержкой"""
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text=BTN_STOP)],
         ],
         resize_keyboard=True,
+        one_time_keyboard=False,
         input_field_placeholder="Напиши сообщение поддержке...",
     )
 
@@ -139,24 +194,28 @@ def users_page_keyboard(page: int, total_pages: int) -> InlineKeyboardMarkup:
     ])
 
 async def get_malfoy_response() -> str:
-    """Запрашивает ответ от случайной нейросети через OpenRouter API"""
+    """Получает ответ от нейросети с разнообразными запросами"""
     if not OPENROUTER_API_KEY:
-        fallback_quotes = [
-            "Мой отец услышит об этом!",
-            "Чистота крови — вот что отличает нас от этих... маглов.",
-            "Ты хотя бы знаешь, с кем разговариваешь? Я — Люциус Малфой.",
-            "В этом мире есть вещи похуже смерти. Например, позор для семьи.",
-            "Твоё присутствие здесь оскорбляет мой род. Убирайся.",
-            "Думаешь, я стал Пожирателем Смерти ради забавы? У меня были причины.",
-            "Мой сын Драко стоит десяти таких, как ты.",
-            "Запомни: Малфои всегда держат слово. И свою палочку наготове.",
-        ]
-        return random.choice(fallback_quotes)
+        return get_fallback_quote()
 
-    # Выбираем случайную модель из списка
-    selected_model = random.choice(MALFOY_MODELS)
-    logger.info(f"🎲 Выбрана модель: {selected_model}")
+    # Выбираем случайный запрос для разнообразия
+    user_prompt = random.choice(MALFOY_USER_PROMPTS)
+    
+    # Пробуем модели по порядку
+    for model in MALFOY_MODELS:
+        try:
+            response = await try_model(model, user_prompt)
+            if response and len(response) > 10:  # Проверяем что ответ не пустой
+                return response
+        except Exception as e:
+            logger.warning(f"Модель {model} не ответила: {e}")
+            continue
+    
+    # Если все модели не ответили
+    return get_fallback_quote()
 
+async def try_model(model: str, user_prompt: str) -> str:
+    """Пробует получить ответ от конкретной модели"""
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "Content-Type": "application/json",
@@ -164,76 +223,71 @@ async def get_malfoy_response() -> str:
         "X-Title": "MalfoyBot",
     }
     
+    # Варьируем параметры для разнообразия
+    temperature = random.uniform(0.8, 1.2)
+    max_tokens = random.randint(150, 400)  # Иногда длинные, иногда короткие ответы
+    
     payload = {
-        "model": selected_model,
+        "model": model,
         "messages": [
-            {"role": "system", "content": MALFOY_PROMPT},
-            {"role": "user", "content": "Скажи что-нибудь в своём стиле, Люциус."}
+            {"role": "system", "content": MALFOY_SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt}
         ],
-        "max_tokens": 150,
-        "temperature": 0.9,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "top_p": 0.95,
+        "frequency_penalty": 0.3,  # Уменьшаем повторения
+        "presence_penalty": 0.3,   # Поощряем новые темы
     }
     
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                headers=headers,
-                json=payload,
-                timeout=aiohttp.ClientTimeout(total=15)
-            ) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    model_used = data.get("model", selected_model)
-                    logger.info(f"✅ Ответ от модели: {model_used}")
-                    return data["choices"][0]["message"]["content"].strip()
-                else:
-                    logger.error(f"OpenRouter API error: {response.status}")
-                    # Пробуем другую модель при ошибке
-                    return await fallback_model_response()
-    except Exception as e:
-        logger.error(f"OpenRouter API error: {e}")
-        return await fallback_model_response()
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers=headers,
+            json=payload,
+            timeout=aiohttp.ClientTimeout(total=20)
+        ) as response:
+            if response.status == 200:
+                data = await response.json()
+                content = data["choices"][0]["message"]["content"].strip()
+                # Убираем возможные описания действий в звёздочках
+                content = content.replace("*", "")
+                return content
+            else:
+                raise Exception(f"HTTP {response.status}")
 
-async def fallback_model_response() -> str:
-    """Запасной вариант с другой моделью"""
-    try:
-        # Пробуем самую надёжную модель
-        headers = {
-            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-            "Content-Type": "application/json",
-        }
-        payload = {
-            "model": "google/gemma-2-9b-it:free",
-            "messages": [
-                {"role": "system", "content": MALFOY_PROMPT},
-                {"role": "user", "content": "Скажи что-нибудь."}
-            ],
-            "max_tokens": 100,
-            "temperature": 0.9,
-        }
+def get_fallback_quote() -> str:
+    """Запасные цитаты на случай отказа всех нейросетей"""
+    quotes = [
+        "Мой отец услышит об этом! Я прослежу, чтобы ты пожалел о своей дерзости.",
         
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                headers=headers,
-                json=payload,
-                timeout=aiohttp.ClientTimeout(total=10)
-            ) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    return data["choices"][0]["message"]["content"].strip()
-    except:
-        pass
-    
-    # Если всё плохо - возвращаем случайную цитату
-    fallback_quotes = [
-        "Мой отец услышит об этом!",
-        "Чистота крови — вот что отличает нас от этих... маглов.",
-        "Ты хотя бы знаешь, с кем разговариваешь? Я — Люциус Малфой.",
-        "В этом мире есть вещи похуже смерти. Например, позор для семьи.",
+        "Чистота крови — вот что отличает истинных волшебников от всяких грязнокровок. Мой род веками сохранял эту чистоту, и я намерен продолжать эту традицию.",
+        
+        "Ты хоть представляешь, с кем разговариваешь? Я — Люциус Малфой, и моё влияние в Министерстве магии безгранично. Одно моё слово — и ты будешь стёрт из магического общества.",
+        
+        "В этом мире есть вещи похуже смерти. Например, позор для семьи. Малфои никогда не опускались до уровня обычных волшебников, и я не позволю этому случиться сейчас.",
+        
+        "Мой сын Драко — наследник всего, что я построил. Он будет достоин имени Малфой, даже если мне придётся лично уничтожить каждого, кто встанет у него на пути.",
+        
+        "Маглы со своими жалкими технологиями... Они даже не подозревают, что рядом с ними существует целый мир, полный магии и могущества, которое им никогда не постичь.",
+        
+        "Знаешь, что отличает Малфоев от других чистокровных семей? Мы не просто говорим о власти — мы её берём. Решительно и без колебаний.",
+        
+        "Мой особняк в Малфой-мэноре стоит больше, чем всё имущество твоей жалкой семьи. И это лишь малая часть того, чем владеет мой род.",
+        
+        "Тёмный Лорд... Многие не поняли его величия. Но я видел. Я знал. И когда придёт время, Малфои снова будут на правильной стороне истории.",
+        
+        "Ты думаешь, это просто трость? Глупец. В ней заключена магия, способная стереть тебя в порошок. Но я не стану тратить её на такое ничтожество.",
+        
+        "Хогвартс уже не тот, что был в моё время. Тогда чистокровные волшебники знали своё место — на вершине. А теперь... теперь даже грязнокровки считают себя равными нам.",
+        
+        "Деньги, влияние, магическая сила — всё это лишь инструменты. Главное оружие Малфоев — умение ждать и наносить удар в самый неожиданный момент.",
+        
+        "Мой отец говорил: 'Люциус, никогда не доверяй тому, кто ниже тебя по крови'. И я следую этому принципу всю жизнь. Поэтому я здесь, а ты — там.",
+        
+        "Ты когда-нибудь видел настоящие тёмные артефакты? Нет, не те безделушки, что продают в Лютном переулке. Я говорю о вещах, способных менять ход истории.",
     ]
-    return random.choice(fallback_quotes)
+    return random.choice(quotes)
 
 @dp.message(CommandStart(), is_admin_filter)
 async def cmd_start_admin(message: Message) -> None:
@@ -251,7 +305,11 @@ async def cmd_start_admin(message: Message) -> None:
 
 @dp.message(CommandStart(), is_user_filter)
 async def cmd_start_user(message: Message) -> None:
-    await message.answer(greeting_text, reply_markup=user_keyboard())
+    # Отправляем приветствие и принудительно показываем клавиатуру
+    await message.answer(
+        greeting_text,
+        reply_markup=user_keyboard()
+    )
 
 async def enter_chat(message: Message) -> None:
     active_chat_users.add(message.chat.id)
@@ -272,7 +330,10 @@ async def enter_chat(message: Message) -> None:
 
 async def leave_chat(message: Message) -> None:
     active_chat_users.discard(message.chat.id)
-    await message.answer("Диалог завершен.", reply_markup=user_keyboard())
+    await message.answer(
+        "Диалог завершен.",
+        reply_markup=user_keyboard()  # Возвращаем основную клавиатуру
+    )
     if admin_chat_id:
         user = message.from_user
         uname = f"@{user.username}" if user.username else "(без username)"
@@ -296,6 +357,22 @@ async def btn_enter_chat(message: Message) -> None:
 @dp.message(is_user_filter, F.text == BTN_STOP)
 async def btn_leave_chat(message: Message) -> None:
     await leave_chat(message)
+
+@dp.message(is_user_filter, F.text == BTN_START)
+async def btn_start(message: Message) -> None:
+    await message.answer(greeting_text, reply_markup=user_keyboard())
+
+@dp.message(is_user_filter, F.text == BTN_LUCK)
+async def btn_luck(message: Message) -> None:
+    await cmd_luck(message)
+
+@dp.message(is_user_filter, F.text == BTN_BURMALDA)
+async def btn_burmalda(message: Message) -> None:
+    await cmd_burmalda(message)
+
+@dp.message(is_user_filter, F.text == BTN_MALFOY)
+async def btn_malfoy(message: Message) -> None:
+    await cmd_malfoy(message)
 
 @dp.message(Command("panel"), is_admin_filter)
 async def cmd_panel(message: Message) -> None:
@@ -460,7 +537,6 @@ def track_user(message: Message) -> None:
 
 async def forward_to_admin(message: Message) -> None:
     if admin_chat_id is None:
-        logger.warning("Admin chat ID не задан.")
         return
 
     user = message.from_user
@@ -501,14 +577,6 @@ async def forward_to_admin(message: Message) -> None:
     except Exception as e:
         logger.error(f"Failed to forward message: {e}")
 
-@dp.message(is_user_filter, F.text == BTN_START)
-async def btn_start(message: Message) -> None:
-    await message.answer(greeting_text, reply_markup=user_keyboard())
-
-@dp.message(is_user_filter, F.text == BTN_LUCK)
-async def btn_luck(message: Message) -> None:
-    await cmd_luck(message)
-
 @dp.message(Command("luck"))
 async def cmd_luck(message: Message) -> None:
     try:
@@ -525,59 +593,43 @@ async def cmd_luck(message: Message) -> None:
         if u > b:
             result = (
                 "Что? Ты выиграл? Случайность. Чистая случайность. Не привыкай. "
-                "Это не повторится. Даже если будешь играть до конца жизни. "
-                "И знаешь что? Я дам тебе реванш. Из чистого любопытства. "
-                "Посмотрим, повезёт ли тебе дважды."
+                "Это не повторится."
             )
         elif u < b:
             result = (
-                "И что я говорил? Ты проиграл. Как и ожидалось. "
-                "Не расстраивайся. Ты не первый. Ты не последний. "
-                "Ты просто очередной, кто попытался бросить вызов Малфою и пожалел об этом."
+                "И что я говорил? Ты проиграл. Как и ожидалось."
             )
         else:
-            result = (
-                "Ничья? Неожиданно. У тебя есть удача. Или я просто отвлёкся. "
-                "Давай переиграем. Мне не нравится оставлять дела незаконченными. "
-                "Тем более — когда они такие близкие к моей победе."
-            )
+            result = "Ничья? Неожиданно."
         await message.answer(f"Ты: {u} — Я: {b}\n{result}")
     except Exception as e:
         logger.error(f"/luck error: {e}")
-        await message.answer(f"Ошибка: {e}")
-
-@dp.message(is_user_filter, F.text == BTN_BURMALDA)
-async def btn_burmalda(message: Message) -> None:
-    await cmd_burmalda(message)
 
 @dp.message(Command("burmalda"))
 async def cmd_burmalda(message: Message) -> None:
     try:
         await message.answer(
-            "Так-так, казино... И всё благодаря Макдональд. Она, видимо, решила, что мне не хватает развлечений. "
-            "Что ж, раз уж ты тут — давай проверим, есть ли у тебя что-то кроме наглости."
+            "Так-так, казино... Проверим, есть ли у тебя что-то кроме наглости."
         )
         msg = await message.answer_dice(emoji="🎰")
         await asyncio.sleep(3)
         value = msg.dice.value
         if value == 64:
-            text = "Джекпот! Ты сорвал куш, хотя я сомневаюсь, что это поможет тебе в жизни."
+            text = "Джекпот!"
         elif value > 40:
-            text = "Неплохо. Почти что-то достойное. Но до моего величия тебе далеко."
+            text = "Неплохо."
         else:
-            text = "Пусто. Как и в твоих карманах. Типичный результат для такого игрока."
+            text = "Пусто."
         await message.answer(text)
     except Exception as e:
         logger.error(f"/burmalda error: {e}")
-        await message.answer(f"Ошибка: {e}")
-
-@dp.message(is_user_filter, F.text == BTN_MALFOY)
-async def btn_malfoy(message: Message) -> None:
-    await cmd_malfoy(message)
 
 @dp.message(Command("malfoy"))
 async def cmd_malfoy(message: Message) -> None:
-    thinking_msg = await message.answer("🐍 *Люциус Малфой поправляет мантию и задумчиво смотрит на тебя...*", parse_mode="Markdown")
+    thinking_msg = await message.answer(
+        "🐍 *Люциус Малфой поправляет мантию и задумчиво смотрит на тебя...*",
+        parse_mode="Markdown"
+    )
     malfoy_response = await get_malfoy_response()
     await thinking_msg.delete()
     await message.answer(f"🐍 {malfoy_response}")
@@ -585,27 +637,34 @@ async def cmd_malfoy(message: Message) -> None:
 @dp.message(is_user_filter, F.text.startswith("/"))
 async def handle_unknown_command(message: Message) -> None:
     await message.answer(
-        "Ты серьёзно ошибся в команде? Я ожидал большего. Ну ладно. "
-        "Вот тебе список того, что я умею. Не благодари.\n\n"
+        "Доступные команды:\n\n"
         "/start — 👋 Старт\n"
-        f"/chat — {BTN_CHAT}\n"
+        "/chat — 🤫 Чат с поддержкой\n"
         "/luck — 🎲 Кинуть кость\n"
         "/burmalda — 🎰 Бурмалда\n"
-        "/malfoy — 🐍 Малфой"
+        "/malfoy — 🐍 Малфой",
+        reply_markup=user_keyboard()  # Показываем клавиатуру при ошибке
     )
 
 @dp.message(is_user_filter)
 async def handle_user_message(message: Message) -> None:
-    if message.text in [BTN_CHAT, BTN_STOP, BTN_LUCK, BTN_BURMALDA, BTN_START, BTN_MALFOY]:
+    # Игнорируем кнопки
+    if message.text in [BTN_START, BTN_CHAT, BTN_LUCK, BTN_BURMALDA, BTN_MALFOY, BTN_STOP]:
         return
         
     if message.chat.id not in active_chat_users:
+        # Если пользователь не в чате, показываем клавиатуру
+        await message.answer(
+            "Используй кнопки ниже для навигации.",
+            reply_markup=user_keyboard()
+        )
         return
+    
     track_user(message)
     await forward_to_admin(message)
 
 # ──────────────────────────────────────────────
-# Веб-сервер для Render (Health Check)
+# Веб-сервер для Render
 # ──────────────────────────────────────────────
 
 class HealthCheckHandler(BaseHTTPRequestHandler):
@@ -613,73 +672,27 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-type", "text/html; charset=utf-8")
         self.end_headers()
-        
-        html = """
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>Malfoy Bot - Status</title>
-            <style>
-                body {
-                    font-family: Arial, sans-serif;
-                    display: flex;
-                    justify-content: center;
-                    align-items: center;
-                    height: 100vh;
-                    margin: 0;
-                    background: linear-gradient(135deg, #1a472a, #2d5a3f);
-                    color: white;
-                }
-                .container {
-                    text-align: center;
-                    padding: 40px;
-                    background: rgba(0,0,0,0.3);
-                    border-radius: 20px;
-                    box-shadow: 0 10px 30px rgba(0,0,0,0.5);
-                }
-                h1 { font-size: 3em; margin: 0; }
-                .status { color: #4CAF50; font-size: 1.5em; margin: 20px 0; }
-                .snake { font-size: 4em; }
-                .model { color: #FFD700; font-size: 1em; margin-top: 10px; }
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <div class="snake">🐍</div>
-                <h1>Malfoy Bot</h1>
-                <div class="status">✅ Работает</div>
-                <div class="model">🤖 Мульти-нейросеть</div>
-                <p>Люциус Малфой следит за порядком...</p>
-            </div>
-        </body>
-        </html>
-        """
-        self.wfile.write(html.encode("utf-8"))
+        self.wfile.write(b"Bot is running!")
 
     def log_message(self, format, *args):
         return
 
 def run_web_server():
-    """Запускает веб-сервер для Render Health Check"""
     try:
         server_address = ("0.0.0.0", PORT)
         httpd = HTTPServer(server_address, HealthCheckHandler)
-        logger.info(f"🌐 Веб-сервер запущен на порту {PORT}")
+        logger.info(f"Web server on port {PORT}")
         httpd.serve_forever()
     except Exception as e:
-        logger.error(f"❌ Ошибка запуска веб-сервера: {e}")
-
-# ──────────────────────────────────────────────
-# Запуск бота
-# ──────────────────────────────────────────────
+        logger.error(f"Web server error: {e}")
 
 async def setup_commands() -> None:
     user_commands = [
-        BotCommand(command="start",     description="👋 Старт"),
-        BotCommand(command="chat",      description="🤫 Чат с поддержкой"),
-        BotCommand(command="luck",      description="🎲 Кинуть кость"),
-        BotCommand(command="burmalda",  description="🎰 Бурмалда"),
-        BotCommand(command="malfoy",    description="🐍 Малфой"),
+        BotCommand(command="start", description="👋 Старт"),
+        BotCommand(command="chat", description="🤫 Чат с поддержкой"),
+        BotCommand(command="luck", description="🎲 Кинуть кость"),
+        BotCommand(command="burmalda", description="🎰 Бурмалда"),
+        BotCommand(command="malfoy", description="🐍 Малфой"),
     ]
     admin_commands = user_commands + [
         BotCommand(command="panel", description="⚙️ Панель управления"),
@@ -692,34 +705,19 @@ async def setup_commands() -> None:
             pass
 
 async def main() -> None:
-    logger.info("🚀 Запуск Malfoy Bot...")
-    logger.info(f"🤖 Доступно моделей: {len(MALFOY_MODELS)}")
+    logger.info("Starting Malfoy Bot...")
     
-    # Запускаем веб-сервер в отдельном потоке
-    web_thread = threading.Thread(target=run_web_server, daemon=True)
-    web_thread.start()
-    logger.info("💓 Health-check сервер запущен")
+    # Веб-сервер
+    threading.Thread(target=run_web_server, daemon=True).start()
     
-    # Удаляем вебхук и сбрасываем pending updates
+    # Сбрасываем старые обновления
     await bot.delete_webhook(drop_pending_updates=True)
-    logger.info("🔄 Вебхуки очищены, pending updates сброшены")
     
-    # Настраиваем команды
+    # Команды
     await setup_commands()
-    logger.info("⚙️ Команды настроены")
     
-    logger.info("🤖 Бот запущен и готов к работе!")
-    try:
-        await dp.start_polling(bot)
-    except Exception as e:
-        logger.error(f"❌ Критическая ошибка: {e}")
-        sys.exit(1)
+    logger.info("Bot is running!")
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("👋 Бот остановлен")
-    except Exception as e:
-        logger.error(f"💥 Фатальная ошибка: {e}")
-        sys.exit(1)
+    asyncio.run(main())
