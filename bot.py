@@ -3,7 +3,6 @@ import logging
 import os
 import sys
 import threading
-import signal
 from dataclasses import dataclass, field
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -22,21 +21,17 @@ import aiohttp
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Проверка переменных окружения
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-if not BOT_TOKEN:
-    logger.error("❌ BOT_TOKEN не найден в переменных окружения!")
-    sys.exit(1)
-
+# Загрузка переменных окружения с fallback-значениями
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "1187881528:AAESwXPEf0HhStxCjzOLA0YXzlxzLQM2mH8")
 ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "IvanIsakau").lstrip("@")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
 PORT = int(os.environ.get("PORT", 10000))
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 
-# Логируем запуск
-logger.info(f"🚀 Запуск бота с ID: {BOT_TOKEN.split(':')[0]}")
-logger.info(f"👑 Администратор: @{ADMIN_USERNAME}")
-logger.info(f"🔑 OpenRouter API: {'настроен' if OPENROUTER_API_KEY else 'не настроен'}")
+logger.info(f"🔑 BOT_TOKEN: {BOT_TOKEN[:15]}...")
+logger.info(f"👑 ADMIN: @{ADMIN_USERNAME}")
+logger.info(f"🌐 PORT: {PORT}")
+logger.info(f"🤖 OpenRouter API: {'✅' if OPENROUTER_API_KEY else '❌ (не задан)'}")
 
 bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
@@ -545,24 +540,75 @@ async def handle_user_message(message: Message) -> None:
     track_user(message)
     await forward_to_admin(message)
 
+# ──────────────────────────────────────────────
+# Веб-сервер для Render (Health Check)
+# ──────────────────────────────────────────────
+
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
-        self.send_header("Content-type", "text/plain; charset=utf-8")
+        self.send_header("Content-type", "text/html; charset=utf-8")
         self.end_headers()
-        self.wfile.write("Бот работает!".encode("utf-8"))
+        
+        # Красивая HTML-страница для проверки
+        html = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Malfoy Bot - Status</title>
+            <style>
+                body {
+                    font-family: Arial, sans-serif;
+                    display: flex;
+                    justify-content: center;
+                    align-items: center;
+                    height: 100vh;
+                    margin: 0;
+                    background: linear-gradient(135deg, #1a472a, #2d5a3f);
+                    color: white;
+                }
+                .container {
+                    text-align: center;
+                    padding: 40px;
+                    background: rgba(0,0,0,0.3);
+                    border-radius: 20px;
+                    box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+                }
+                h1 { font-size: 3em; margin: 0; }
+                .status { color: #4CAF50; font-size: 1.5em; margin: 20px 0; }
+                .snake { font-size: 4em; }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="snake">🐍</div>
+                <h1>Malfoy Bot</h1>
+                <div class="status">✅ Работает</div>
+                <p>Люциус Малфой следит за порядком...</p>
+            </div>
+        </body>
+        </html>
+        """
+        self.wfile.write(html.encode("utf-8"))
 
     def log_message(self, format, *args):
+        # Отключаем логи HTTP-запросов
         return
 
-def run_health_check_server():
+def run_web_server():
+    """Запускает веб-сервер для Render Health Check"""
     try:
         server_address = ("0.0.0.0", PORT)
         httpd = HTTPServer(server_address, HealthCheckHandler)
-        logger.info(f"💓 Health-check сервер на порту {PORT}")
+        logger.info(f"🌐 Веб-сервер запущен на порту {PORT}")
+        logger.info(f"📋 Health Check URL: http://0.0.0.0:{PORT}")
         httpd.serve_forever()
     except Exception as e:
-        logger.error(f"Ошибка веб-сервера: {e}")
+        logger.error(f"❌ Ошибка запуска веб-сервера: {e}")
+
+# ──────────────────────────────────────────────
+# Запуск бота
+# ──────────────────────────────────────────────
 
 async def setup_commands() -> None:
     user_commands = [
@@ -583,21 +629,34 @@ async def setup_commands() -> None:
             pass
 
 async def main() -> None:
-    logger.info("🚀 Запуск бота...")
+    logger.info("🚀 Запуск Malfoy Bot...")
     
-    # Запускаем health-check сервер
-    threading.Thread(target=run_health_check_server, daemon=True).start()
+    # Запускаем веб-сервер в отдельном потоке
+    web_thread = threading.Thread(target=run_web_server, daemon=True)
+    web_thread.start()
+    logger.info("💓 Health-check сервер запущен")
     
-    # Настраиваем команды
-    await setup_commands()
-    
-    # Запускаем бота с удалением вебхука (чтобы избежать конфликтов)
+    # Удаляем старые вебхуки и сбрасываем обновления
     await bot.delete_webhook(drop_pending_updates=True)
+    logger.info("🔄 Вебхуки очищены")
     
+    # Настраиваем команды бота
+    await setup_commands()
+    logger.info("⚙️ Команды настроены")
+    
+    # Запускаем поллинг
+    logger.info("🤖 Бот запущен и готов к работе!")
     try:
         await dp.start_polling(bot)
     except Exception as e:
-        logger.error(f"Ошибка: {e}")
+        logger.error(f"❌ Критическая ошибка: {e}")
+        sys.exit(1)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("👋 Бот остановлен")
+    except Exception as e:
+        logger.error(f"💥 Фатальная ошибка: {e}")
+        sys.exit(1)
