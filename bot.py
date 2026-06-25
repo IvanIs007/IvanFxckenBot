@@ -22,19 +22,14 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Переменные окружения с проверкой
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-if not BOT_TOKEN:
-    logger.error("BOT_TOKEN не найден в переменных окружения!")
-    sys.exit(1)
-
-ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "mr_zefirka").lstrip("@")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "1187881528:AAESwXPEf0HhStxCjzOLA0YXzlxzLQM2mH8")
+ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "IvanIsakau").lstrip("@")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
 PORT = int(os.environ.get("PORT", 10000))
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 
-# Проверка наличия API ключа OpenRouter
-if not OPENROUTER_API_KEY:
-    logger.warning("OPENROUTER_API_KEY не задан. Функция Малфоя будет работать в ограниченном режиме.")
+logger.info(f"Бот запускается с токеном: {BOT_TOKEN[:10]}...")
+logger.info(f"Администратор: @{ADMIN_USERNAME}")
 
 bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
@@ -142,13 +137,21 @@ def users_page_keyboard(page: int, total_pages: int) -> InlineKeyboardMarkup:
 async def get_malfoy_response() -> str:
     """Запрашивает ответ от Llama через OpenRouter API"""
     if not OPENROUTER_API_KEY:
-        return "Простите, мой фамильяр временно недоступен. Даже у Малфоев бывают технические неполадки."
+        # Fallback-цитаты если API ключ не задан
+        fallback_quotes = [
+            "Мой отец услышит об этом!",
+            "Чистота крови — вот что отличает нас от этих... маглов.",
+            "Ты хотя бы знаешь, с кем разговариваешь? Я — Люциус Малфой.",
+            "В этом мире есть вещи похуже смерти. Например, позор для семьи.",
+        ]
+        import random
+        return random.choice(fallback_quotes)
 
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "Content-Type": "application/json",
-        "HTTP-Referer": "https://t.me/malfoy_bot",  # Рекомендуется OpenRouter
-        "X-Title": "MalfoyBot",  # Рекомендуется OpenRouter
+        "HTTP-Referer": "https://t.me/malfoy_bot",
+        "X-Title": "MalfoyBot",
     }
     
     payload = {
@@ -640,11 +643,6 @@ async def setup_commands() -> None:
 
 async def main() -> None:
     logger.info("Starting feedback bot...")
-    
-    # Проверка наличия токена бота
-    if not BOT_TOKEN:
-        logger.error("BOT_TOKEN не задан в переменных окружения!")
-        return
     
     # Запуск веб-сервера для health-check
     threading.Thread(target=run_health_check_server, daemon=True).start()
