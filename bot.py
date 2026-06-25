@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import sys
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -20,12 +21,20 @@ import aiohttp
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Переменные окружения
-BOT_TOKEN = os.environ["BOT_TOKEN"]
+# Переменные окружения с проверкой
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+if not BOT_TOKEN:
+    logger.error("BOT_TOKEN не найден в переменных окружения!")
+    sys.exit(1)
+
 ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "mr_zefirka").lstrip("@")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
 PORT = int(os.environ.get("PORT", 10000))
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
+
+# Проверка наличия API ключа OpenRouter
+if not OPENROUTER_API_KEY:
+    logger.warning("OPENROUTER_API_KEY не задан. Функция Малфоя будет работать в ограниченном режиме.")
 
 bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
@@ -138,6 +147,8 @@ async def get_malfoy_response() -> str:
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "Content-Type": "application/json",
+        "HTTP-Referer": "https://t.me/malfoy_bot",  # Рекомендуется OpenRouter
+        "X-Title": "MalfoyBot",  # Рекомендуется OpenRouter
     }
     
     payload = {
@@ -162,20 +173,29 @@ async def get_malfoy_response() -> str:
                 "https://openrouter.ai/api/v1/chat/completions",
                 headers=headers,
                 json=payload,
-                timeout=15
+                timeout=aiohttp.ClientTimeout(total=15)
             ) as response:
                 if response.status == 200:
                     data = await response.json()
                     return data["choices"][0]["message"]["content"].strip()
+                elif response.status == 401:
+                    logger.error("OpenRouter API: неверный API ключ")
+                    return "Моя магия заблокирована! Кто-то посмел ограничить силу Малфоя. Непростительно!"
+                elif response.status == 429:
+                    logger.error("OpenRouter API: превышен лимит запросов")
+                    return "Даже моё терпение имеет пределы. Слишком много запросов — подождите."
                 else:
                     logger.error(f"OpenRouter API error: {response.status}")
                     return "Очевидно, даже нейросети боятся меня. Попробуйте позже, когда она соберётся с духом."
     except asyncio.TimeoutError:
         logger.error("OpenRouter API timeout")
         return "Я не намерен ждать вечность. Нейросеть, видимо, решила, что может игнорировать Малфоя. Непростительно."
+    except aiohttp.ClientError as e:
+        logger.error(f"OpenRouter API connection error: {e}")
+        return "Кажется, какая-то грязнокровка нарушила связь с моим сознанием. Попробуйте позже."
     except Exception as e:
-        logger.error(f"OpenRouter API error: {e}")
-        return "Кажется, какая-то грязнокровка сломала мою магию. Попробуйте позже."
+        logger.error(f"OpenRouter API unexpected error: {e}")
+        return "Что-то пошло не так. Даже магия Малфоев иногда даёт сбой."
 
 # ──────────────────────────────────────────────
 # Хэндлеры команд
@@ -588,10 +608,13 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         return
 
 def run_health_check_server():
-    server_address = ("", PORT)
-    httpd = HTTPServer(server_address, HealthCheckHandler)
-    logger.info(f"Встроенный веб-сервер запущен на порту {PORT}")
-    httpd.serve_forever()
+    try:
+        server_address = ("0.0.0.0", PORT)
+        httpd = HTTPServer(server_address, HealthCheckHandler)
+        logger.info(f"Встроенный веб-сервер запущен на порту {PORT}")
+        httpd.serve_forever()
+    except Exception as e:
+        logger.error(f"Ошибка запуска веб-сервера: {e}")
 
 # ──────────────────────────────────────────────
 # Запуск
@@ -618,10 +641,20 @@ async def setup_commands() -> None:
 async def main() -> None:
     logger.info("Starting feedback bot...")
     
+    # Проверка наличия токена бота
+    if not BOT_TOKEN:
+        logger.error("BOT_TOKEN не задан в переменных окружения!")
+        return
+    
+    # Запуск веб-сервера для health-check
     threading.Thread(target=run_health_check_server, daemon=True).start()
     
     await setup_commands()
-    await dp.start_polling(bot)
+    
+    try:
+        await dp.start_polling(bot)
+    except Exception as e:
+        logger.error(f"Ошибка при запуске бота: {e}")
 
 if __name__ == "__main__":
     asyncio.run(main())
