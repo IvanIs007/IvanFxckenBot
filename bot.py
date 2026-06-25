@@ -44,12 +44,13 @@ active_chat_users: set[int] = set()
 
 USERS_PER_PAGE = 10
 
-BTN_CHAT      = "🤫Приватный диалог"
+# Текст кнопок (как команды)
+BTN_CHAT      = "🤫 Чат с поддержкой"
 BTN_STOP      = "🛑 Завершить диалог"
 BTN_LUCK      = "🎲 Кинуть кость"
-BTN_BURMALDA  = "Бурмалда 🎰"
+BTN_BURMALDA  = "🎰 Бурмалда"
 BTN_START     = "👋 Старт"
-BTN_MALFOY    = "Малфой 🐍"
+BTN_MALFOY    = "🐍 Малфой"
 
 MALFOY_PROMPT = """Ты — Люциус Малфой, чистокровный волшебник, аристократ, бывший Пожиратель Смерти. 
 Ты высокомерен, надменен, презираешь маглов и полукровок. 
@@ -81,24 +82,26 @@ async def is_user_filter(message: Message) -> bool:
     return not await is_admin_filter(message)
 
 def user_keyboard() -> ReplyKeyboardMarkup:
+    """Клавиатура с командами бота"""
     return ReplyKeyboardMarkup(
         keyboard=[
+            [KeyboardButton(text=BTN_START)],
             [KeyboardButton(text=BTN_CHAT)],
             [KeyboardButton(text=BTN_LUCK), KeyboardButton(text=BTN_BURMALDA)],
             [KeyboardButton(text=BTN_MALFOY)],
-            [KeyboardButton(text=BTN_START)],
         ],
         resize_keyboard=True,
-        input_field_placeholder="Выбери действие...",
+        input_field_placeholder="Выбери команду...",
     )
 
 def chat_keyboard() -> ReplyKeyboardMarkup:
+    """Клавиатура для режима чата"""
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text=BTN_STOP)],
         ],
         resize_keyboard=True,
-        input_field_placeholder="Напиши сообщение поддержке...",
+        input_field_placeholder="Напиши сообщение...",
     )
 
 def admin_panel_keyboard() -> InlineKeyboardMarkup:
@@ -126,6 +129,7 @@ def users_page_keyboard(page: int, total_pages: int) -> InlineKeyboardMarkup:
     ])
 
 async def get_malfoy_response() -> str:
+    """Запрашивает ответ от Gemma через OpenRouter API"""
     if not OPENROUTER_API_KEY:
         import random
         fallback_quotes = [
@@ -144,7 +148,7 @@ async def get_malfoy_response() -> str:
     }
     
     payload = {
-        "model": "meta-llama/llama-3.2-3b-instruct:free",
+        "model": "google/gemma-2-9b-it:free",  # Gemma 2 9B (бесплатная)
         "messages": [
             {"role": "system", "content": MALFOY_PROMPT},
             {"role": "user", "content": "Скажи что-нибудь в своём стиле, Люциус."}
@@ -523,11 +527,11 @@ async def handle_unknown_command(message: Message) -> None:
     await message.answer(
         "Ты серьёзно ошибся в команде? Я ожидал большего. Ну ладно. "
         "Вот тебе список того, что я умею. Не благодари.\n\n"
-        "/start — начать диалог\n"
+        "/start — 👋 Старт\n"
         f"/chat — {BTN_CHAT}\n"
-        "/luck — кинуть кость\n"
-        "/burmalda — Бурмалда 🎰\n"
-        "/malfoy — спросить Люциуса Малфоя 🐍"
+        "/luck — 🎲 Кинуть кость\n"
+        "/burmalda — 🎰 Бурмалда\n"
+        "/malfoy — 🐍 Малфой"
     )
 
 @dp.message(is_user_filter)
@@ -550,7 +554,6 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.send_header("Content-type", "text/html; charset=utf-8")
         self.end_headers()
         
-        # Красивая HTML-страница для проверки
         html = """
         <!DOCTYPE html>
         <html>
@@ -577,6 +580,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
                 h1 { font-size: 3em; margin: 0; }
                 .status { color: #4CAF50; font-size: 1.5em; margin: 20px 0; }
                 .snake { font-size: 4em; }
+                .model { color: #FFD700; font-size: 1em; margin-top: 10px; }
             </style>
         </head>
         <body>
@@ -584,6 +588,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
                 <div class="snake">🐍</div>
                 <h1>Malfoy Bot</h1>
                 <div class="status">✅ Работает</div>
+                <div class="model">🤖 Google Gemma 2 9B</div>
                 <p>Люциус Малфой следит за порядком...</p>
             </div>
         </body>
@@ -592,7 +597,6 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.wfile.write(html.encode("utf-8"))
 
     def log_message(self, format, *args):
-        # Отключаем логи HTTP-запросов
         return
 
 def run_web_server():
@@ -601,7 +605,6 @@ def run_web_server():
         server_address = ("0.0.0.0", PORT)
         httpd = HTTPServer(server_address, HealthCheckHandler)
         logger.info(f"🌐 Веб-сервер запущен на порту {PORT}")
-        logger.info(f"📋 Health Check URL: http://0.0.0.0:{PORT}")
         httpd.serve_forever()
     except Exception as e:
         logger.error(f"❌ Ошибка запуска веб-сервера: {e}")
@@ -612,11 +615,11 @@ def run_web_server():
 
 async def setup_commands() -> None:
     user_commands = [
-        BotCommand(command="start",     description="👋 Начать диалог"),
-        BotCommand(command="chat",      description=f"{BTN_CHAT}"),
+        BotCommand(command="start",     description="👋 Старт"),
+        BotCommand(command="chat",      description="🤫 Чат с поддержкой"),
         BotCommand(command="luck",      description="🎲 Кинуть кость"),
         BotCommand(command="burmalda",  description="🎰 Бурмалда"),
-        BotCommand(command="malfoy",    description="🐍 Спросить Люциуса Малфоя"),
+        BotCommand(command="malfoy",    description="🐍 Малфой"),
     ]
     admin_commands = user_commands + [
         BotCommand(command="panel", description="⚙️ Панель управления"),
@@ -630,21 +633,18 @@ async def setup_commands() -> None:
 
 async def main() -> None:
     logger.info("🚀 Запуск Malfoy Bot...")
+    logger.info("🤖 Используется модель: Google Gemma 2 9B")
     
-    # Запускаем веб-сервер в отдельном потоке
     web_thread = threading.Thread(target=run_web_server, daemon=True)
     web_thread.start()
     logger.info("💓 Health-check сервер запущен")
     
-    # Удаляем старые вебхуки и сбрасываем обновления
     await bot.delete_webhook(drop_pending_updates=True)
     logger.info("🔄 Вебхуки очищены")
     
-    # Настраиваем команды бота
     await setup_commands()
     logger.info("⚙️ Команды настроены")
     
-    # Запускаем поллинг
     logger.info("🤖 Бот запущен и готов к работе!")
     try:
         await dp.start_polling(bot)
