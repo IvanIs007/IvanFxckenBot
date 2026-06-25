@@ -3,6 +3,7 @@ import logging
 import os
 import sys
 import threading
+import signal
 from dataclasses import dataclass, field
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -21,15 +22,21 @@ import aiohttp
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Переменные окружения с проверкой
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "1187881528:AAESwXPEf0HhStxCjzOLA0YXzlxzLQM2mH8")
+# Проверка переменных окружения
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+if not BOT_TOKEN:
+    logger.error("❌ BOT_TOKEN не найден в переменных окружения!")
+    sys.exit(1)
+
 ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "IvanIsakau").lstrip("@")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
 PORT = int(os.environ.get("PORT", 10000))
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 
-logger.info(f"Бот запускается с токеном: {BOT_TOKEN[:10]}...")
-logger.info(f"Администратор: @{ADMIN_USERNAME}")
+# Логируем запуск
+logger.info(f"🚀 Запуск бота с ID: {BOT_TOKEN.split(':')[0]}")
+logger.info(f"👑 Администратор: @{ADMIN_USERNAME}")
+logger.info(f"🔑 OpenRouter API: {'настроен' if OPENROUTER_API_KEY else 'не настроен'}")
 
 bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
@@ -49,7 +56,6 @@ BTN_BURMALDA  = "Бурмалда 🎰"
 BTN_START     = "👋 Старт"
 BTN_MALFOY    = "Малфой 🐍"
 
-# Промпт для Llama
 MALFOY_PROMPT = """Ты — Люциус Малфой, чистокровный волшебник, аристократ, бывший Пожиратель Смерти. 
 Ты высокомерен, надменен, презираешь маглов и полукровок. 
 Ты говоришь изысканно, но язвительно. Ты всегда напоминаешь о чистоте крови и величии рода Малфоев.
@@ -71,19 +77,13 @@ total_messages: int = 0
 class AdminStates(StatesGroup):
     waiting_for_greeting = State()
 
-# Функция-фильтр для проверки на админа
 async def is_admin_filter(message: Message) -> bool:
     if ADMIN_ID and message.from_user and message.from_user.id == ADMIN_ID:
         return True
     return bool(message.from_user and message.from_user.username == ADMIN_USERNAME)
 
-# Функция-фильтр для проверки на обычного пользователя
 async def is_user_filter(message: Message) -> bool:
     return not await is_admin_filter(message)
-
-# ──────────────────────────────────────────────
-# Клавиатуры
-# ──────────────────────────────────────────────
 
 def user_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
@@ -130,21 +130,15 @@ def users_page_keyboard(page: int, total_pages: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="↩️ Панель", callback_data="back_panel")],
     ])
 
-# ──────────────────────────────────────────────
-# Функция запроса к OpenRouter (Llama)
-# ──────────────────────────────────────────────
-
 async def get_malfoy_response() -> str:
-    """Запрашивает ответ от Llama через OpenRouter API"""
     if not OPENROUTER_API_KEY:
-        # Fallback-цитаты если API ключ не задан
+        import random
         fallback_quotes = [
             "Мой отец услышит об этом!",
             "Чистота крови — вот что отличает нас от этих... маглов.",
             "Ты хотя бы знаешь, с кем разговариваешь? Я — Люциус Малфой.",
             "В этом мире есть вещи похуже смерти. Например, позор для семьи.",
         ]
-        import random
         return random.choice(fallback_quotes)
 
     headers = {
@@ -157,14 +151,8 @@ async def get_malfoy_response() -> str:
     payload = {
         "model": "meta-llama/llama-3.2-3b-instruct:free",
         "messages": [
-            {
-                "role": "system",
-                "content": MALFOY_PROMPT
-            },
-            {
-                "role": "user", 
-                "content": "Скажи что-нибудь в своём стиле, Люциус."
-            }
+            {"role": "system", "content": MALFOY_PROMPT},
+            {"role": "user", "content": "Скажи что-нибудь в своём стиле, Люциус."}
         ],
         "max_tokens": 150,
         "temperature": 0.9,
@@ -181,28 +169,12 @@ async def get_malfoy_response() -> str:
                 if response.status == 200:
                     data = await response.json()
                     return data["choices"][0]["message"]["content"].strip()
-                elif response.status == 401:
-                    logger.error("OpenRouter API: неверный API ключ")
-                    return "Моя магия заблокирована! Кто-то посмел ограничить силу Малфоя. Непростительно!"
-                elif response.status == 429:
-                    logger.error("OpenRouter API: превышен лимит запросов")
-                    return "Даже моё терпение имеет пределы. Слишком много запросов — подождите."
                 else:
                     logger.error(f"OpenRouter API error: {response.status}")
-                    return "Очевидно, даже нейросети боятся меня. Попробуйте позже, когда она соберётся с духом."
-    except asyncio.TimeoutError:
-        logger.error("OpenRouter API timeout")
-        return "Я не намерен ждать вечность. Нейросеть, видимо, решила, что может игнорировать Малфоя. Непростительно."
-    except aiohttp.ClientError as e:
-        logger.error(f"OpenRouter API connection error: {e}")
-        return "Кажется, какая-то грязнокровка нарушила связь с моим сознанием. Попробуйте позже."
+                    return "Очевидно, даже нейросети боятся меня. Попробуйте позже."
     except Exception as e:
-        logger.error(f"OpenRouter API unexpected error: {e}")
+        logger.error(f"OpenRouter API error: {e}")
         return "Что-то пошло не так. Даже магия Малфоев иногда даёт сбой."
-
-# ──────────────────────────────────────────────
-# Хэндлеры команд
-# ──────────────────────────────────────────────
 
 @dp.message(CommandStart(), is_admin_filter)
 async def cmd_start_admin(message: Message) -> None:
@@ -275,10 +247,6 @@ async def cmd_panel(message: Message) -> None:
         parse_mode="HTML",
         reply_markup=admin_panel_keyboard(),
     )
-
-# ──────────────────────────────────────────────
-# Коллбэки админ-панели
-# ──────────────────────────────────────────────
 
 @dp.callback_query(F.data == "stats")
 async def cb_stats(callback: CallbackQuery) -> None:
@@ -385,10 +353,6 @@ async def receive_new_greeting(message: Message, state: FSMContext) -> None:
         reply_markup=admin_panel_keyboard(),
     )
 
-# ──────────────────────────────────────────────
-# Ответ админа пользователю
-# ──────────────────────────────────────────────
-
 @dp.message(is_admin_filter, F.reply_to_message)
 async def handle_admin_reply(message: Message) -> None:
     replied_id = message.reply_to_message.message_id
@@ -414,10 +378,6 @@ async def handle_admin_reply(message: Message) -> None:
         await message.answer("✅ Ответ отправлен.")
     except Exception as e:
         await message.answer(f"❌ Ошибка отправки: {e}")
-
-# ──────────────────────────────────────────────
-# Пересылка сообщений админу
-# ──────────────────────────────────────────────
 
 def track_user(message: Message) -> None:
     global total_messages
@@ -481,10 +441,6 @@ async def forward_to_admin(message: Message) -> None:
 
     except Exception as e:
         logger.error(f"Failed to forward message: {e}")
-
-# ──────────────────────────────────────────────
-# Пользовательские функции и игра
-# ──────────────────────────────────────────────
 
 @dp.message(is_user_filter, F.text == BTN_START)
 async def btn_start(message: Message) -> None:
@@ -562,14 +518,8 @@ async def btn_malfoy(message: Message) -> None:
 
 @dp.message(Command("malfoy"))
 async def cmd_malfoy(message: Message) -> None:
-    """Отправляет сообщение от имени Люциуса Малфоя через Llama"""
-    # Отправляем сообщение о том, что Малфой думает
     thinking_msg = await message.answer("🐍 *Люциус Малфой поправляет мантию и задумчиво смотрит на тебя...*", parse_mode="Markdown")
-    
-    # Получаем ответ от нейросети
     malfoy_response = await get_malfoy_response()
-    
-    # Удаляем сообщение "думает" и отправляем ответ
     await thinking_msg.delete()
     await message.answer(f"🐍 {malfoy_response}")
 
@@ -587,7 +537,6 @@ async def handle_unknown_command(message: Message) -> None:
 
 @dp.message(is_user_filter)
 async def handle_user_message(message: Message) -> None:
-    # Игнорируем нажатия на системные служебные кнопки
     if message.text in [BTN_CHAT, BTN_STOP, BTN_LUCK, BTN_BURMALDA, BTN_START, BTN_MALFOY]:
         return
         
@@ -595,10 +544,6 @@ async def handle_user_message(message: Message) -> None:
         return
     track_user(message)
     await forward_to_admin(message)
-
-# ──────────────────────────────────────────────
-# Заглушка веб-сервера для Render
-# ──────────────────────────────────────────────
 
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -614,14 +559,10 @@ def run_health_check_server():
     try:
         server_address = ("0.0.0.0", PORT)
         httpd = HTTPServer(server_address, HealthCheckHandler)
-        logger.info(f"Встроенный веб-сервер запущен на порту {PORT}")
+        logger.info(f"💓 Health-check сервер на порту {PORT}")
         httpd.serve_forever()
     except Exception as e:
-        logger.error(f"Ошибка запуска веб-сервера: {e}")
-
-# ──────────────────────────────────────────────
-# Запуск
-# ──────────────────────────────────────────────
+        logger.error(f"Ошибка веб-сервера: {e}")
 
 async def setup_commands() -> None:
     user_commands = [
@@ -642,17 +583,21 @@ async def setup_commands() -> None:
             pass
 
 async def main() -> None:
-    logger.info("Starting feedback bot...")
+    logger.info("🚀 Запуск бота...")
     
-    # Запуск веб-сервера для health-check
+    # Запускаем health-check сервер
     threading.Thread(target=run_health_check_server, daemon=True).start()
     
+    # Настраиваем команды
     await setup_commands()
+    
+    # Запускаем бота с удалением вебхука (чтобы избежать конфликтов)
+    await bot.delete_webhook(drop_pending_updates=True)
     
     try:
         await dp.start_polling(bot)
     except Exception as e:
-        logger.error(f"Ошибка при запуске бота: {e}")
+        logger.error(f"Ошибка: {e}")
 
 if __name__ == "__main__":
     asyncio.run(main())
