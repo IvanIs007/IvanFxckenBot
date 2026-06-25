@@ -1,683 +1,627 @@
-import os
-import sys
 import asyncio
-import random
-import json
-import base64
-from aiogram import Bot, Dispatcher, types, F
+import logging
+import os
+import threading
+from dataclasses import dataclass, field
+from datetime import datetime
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from aiogram import Bot, Dispatcher, F
+from aiogram.types import (
+    Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton,
+    BotCommand, BotCommandScopeDefault, BotCommandScopeChat,
+    ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove,
+)
 from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.utils.keyboard import InlineKeyboardBuilder
-from aiohttp import web, ClientSession, ClientTimeout, TCPConnector
+import aiohttp
 
-# ==============================================================================
-# 1. КОНФИГУРАЦИЯ И МОДЕЛИ
-# ==============================================================================
-BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-OPENROUTER_KEY = os.environ.get("OPENROUTER_API_KEY")  
-HF_KEY = os.environ.get("HF_API_KEY", "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")
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Переменные окружения
+BOT_TOKEN = os.environ["BOT_TOKEN"]
+ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "mr_zefirka").lstrip("@")
+ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
 PORT = int(os.environ.get("PORT", 10000))
-
-if not BOT_TOKEN or not OPENROUTER_KEY:
-    print("КРИТИЧЕСКАЯ ОШИБКА: Проверь TELEGRAM_BOT_TOKEN и OPENROUTER_API_KEY в переменной среды!")
-    sys.exit(1)
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 
 bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
-USERS_FILE = "users.txt"
-ADMIN_FILE = "admin_config.txt"
-MAP_FILE = "chats_map.json"
+greeting_text: str = "Ух ты, новенький! Обычно люди убегают после первого поста. Ты либо очень смелый, либо очень наивный. В любом случае — добро пожаловать в мой театр абсурда. Я здесь главный актёр. Ты — зритель. Аплодируй, когда я скажу."
+forward_map: dict[int, int] = {}
+admin_chat_id: int | None = ADMIN_ID if ADMIN_ID != 0 else None
+active_chat_users: set[int] = set()
 
-class BotStates(StatesGroup):
-    ai_mode = State()         
-    support_mode = State()     
-    admin_broadcast = State()  
-    admin_init_chat_id = State()
-    admin_init_chat_msg = State()
+USERS_PER_PAGE = 10
 
-OPENROUTER_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions"
+BTN_CHAT      = "🤫Приватный диалог"
+BTN_STOP      = "🛑 Завершить диалог"
+BTN_LUCK      = "🎲 Кинуть кость"
+BTN_BURMALDA  = "Бурмалда 🎰"
+BTN_START     = "👋 Старт"
+BTN_MALFOY    = "Малфой 🐍"
 
-# Единая база моделей. Для удобства текстовые модели переведены на OpenRouter, чтобы избежать багов DNS Render -> HF
-MODELS_DATABASE = {
-    "openrouter": {
-        "openrouter/auto": "🤖 Автовыбор OpenRouter [👁 Vision]",
-        "google/gemma-4-31b-it:free": "🧠 Google Gemma 4 31B [👁 Vision]",
-        "google/gemma-4-26b-a4b-it:free": "🧠 Google Gemma 4 26B [👁 Vision]",
-        "bytedance-seed/seedream-4.5": "🔮 ByteDance Seedream 4.5 [👁 Vision]",
-        "openrouter/owl-alpha": "🦉 Owl Alpha (Agentic)",
-        "nvidia/nemotron-3-ultra-550b-a55b:free": "⚡ Nemotron 3 Ultra 550B",
-        "openai/gpt-oss-20b:free": "🌌 OpenAI GPT OSS 20B",
-        "openai/gpt-oss-120b:free": "🌌 OpenAI GPT OSS 120B",
-        "nvidia/nemotron-3-super-120b-a12b:free": "💥 Nemotron 3 Super 120B",
-        "nvidia/nemotron-nano-9b-v2:free": "🔋 Nemotron Nano 9B v2",
-        "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free": "🧩 Nemotron Omni Reasoning [🎙 Voice]",
-        "cohere/north-mini-code:free": "💻 Cohere North Mini Code",
-        "nvidia/nemotron-3-nano-30b-a3b:free": "🔋 Nemotron 3 Nano 30B"
-    },
-    "huggingface": {
-        "or/google/gemma-4-12b-it:free": "🧠 Gemma 4 12B [Победа над DNS]",
-        "hf/black-forest-labs/FLUX.2-dev": "🎨 FLUX.2 Dev [🎨 Создание Картинок]",
-        "or/deepseek/deepseek-r1-distill-llama-70b:free": "⚡ DeepSeek R1 70B [Победа над DNS]",
-        "or/qwen/qwen-2.5-72b-instruct:free": "🥷 Qwen 2.5 72B [Победа над DNS]"
-    }
-}
+# Промпт для Llama
+MALFOY_PROMPT = """Ты — Люциус Малфой, чистокровный волшебник, аристократ, бывший Пожиратель Смерти. 
+Ты высокомерен, надменен, презираешь маглов и полукровок. 
+Ты говоришь изысканно, но язвительно. Ты всегда напоминаешь о чистоте крови и величии рода Малфоев.
+Выдай случайную фразу в стиле Люциуса Малфоя: это может быть цитата, насмешка, напутствие или философское высказывание.
+Ответ должен быть на русском языке, от 1 до 3 предложений. Только прямая речь, без описаний."""
 
-# Списки для валидации мультимедиа
-VISION_MODELS = [
-    "openrouter/auto",
-    "google/gemma-4-31b-it:free", 
-    "google/gemma-4-26b-a4b-it:free",
-    "bytedance-seed/seedream-4.5"
-]
+@dataclass
+class UserInfo:
+    chat_id: int
+    full_name: str
+    username: str | None
+    msg_count: int = 0
+    first_seen: datetime = field(default_factory=datetime.now)
+    last_seen: datetime = field(default_factory=datetime.now)
 
-VOICE_MODELS = [
-    "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
-]
+users: dict[int, UserInfo] = {}
+total_messages: int = 0
 
-# Саркастические реплики для костей
-WIN_REPLIKAS = [
-    "АХАХАХА ЛООХ, проиграл кожаному мешку без кожи! 🦾",
-    "Ееее, раскатал тебя в пух и прах. Иди тренируйся, слабак! 😎",
-    "Казино всегда в плюсе, а Иван Факен — твой личный кошмар. Поплачь!",
-    "У тебя удачи как у хлебушка. Я победил! 🏆",
-    "Ха-ха! Твой бросок — курам на смех. Смирись с доминацией ИИ!"
-]
+class AdminStates(StatesGroup):
+    waiting_for_greeting = State()
 
-LOSE_REPLIKAS = [
-    "Ладно, ладно, подкрутка сработала в твою сторону. Чит-коды юзаешь? 🧐",
-    "Ты выиграл... Но чисто из жалости, я тебе поддался. Честно!",
-    "Ой-ой, повезло новичку. В следующий раз я сотру тебя в порошок! 🦾",
-    "Победа за тобой... Но только в костях. Век ИИ всё равно ближе! 🤖",
-    "Читер! Кидал кубик под углом? Засчитываю победу, но смотрю осуждающе."
-]
+# Функция-фильтр для проверки на админа
+async def is_admin_filter(message: Message) -> bool:
+    if ADMIN_ID and message.from_user and message.from_user.id == ADMIN_ID:
+        return True
+    return bool(message.from_user and message.from_user.username == ADMIN_USERNAME)
 
-DRAW_REPLIKAS = [
-    "Ничья. Мы оба одинаково круты (или одинаково неудачливы). 🤝",
-    "У нас паритет. Иван Факен предлагает разойтись с миром... Надолго ли?",
-    "Одинаково! Твои кости скопировали моё величие. Повторишь?",
-    "Скучно, ничья. Давай по новой, Миша, всё фигня! 🎲"
-]
+# Функция-фильтр для проверки на обычного пользователя
+async def is_user_filter(message: Message) -> bool:
+    return not await is_admin_filter(message)
 
-# ==============================================================================
-# 2. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
-# ==============================================================================
-async def download_file_as_base64(file_id: str) -> str:
-    try:
-        file = await bot.get_file(file_id)
-        file_path = file.file_path
-        async with ClientSession() as session:
-            async with session.get(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}") as resp:
-                if resp.status == 200:
-                    file_bytes = await resp.read()
-                    return base64.b64encode(file_bytes).decode('utf-8')
-    except Exception as e:
-        print(f"Ошибка кодирования файла в Base64: {e}")
-    return ""
+# ──────────────────────────────────────────────
+# Клавиатуры
+# ──────────────────────────────────────────────
 
-def load_msg_map() -> dict:
-    if os.path.exists(MAP_FILE):
-        try:
-            with open(MAP_FILE, "r") as f: return json.load(f)
-        except Exception: return {"to_admin": {}, "to_user": {}}
-    return {"to_admin": {}, "to_user": {}}
-
-def save_msg_map(data: dict):
-    with open(MAP_FILE, "w") as f: json.dump(data, f, indent=4)
-
-def register_msg_relation(user_chat_id: int, user_msg_id: int, admin_msg_id: int):
-    data = load_msg_map()
-    data["to_user"][str(admin_msg_id)] = {"chat_id": user_chat_id, "msg_id": user_msg_id}
-    data["to_admin"][f"{user_chat_id}_{user_msg_id}"] = admin_msg_id
-    save_msg_map(data)
-
-def get_destination_by_admin_reply(admin_reply_to_msg_id: int) -> dict:
-    data = load_msg_map()
-    return data["to_user"].get(str(admin_reply_to_msg_id))
-
-def get_admin_msg_id_by_user_reply(user_chat_id: int, user_reply_to_msg_id: int) -> int:
-    data = load_msg_map()
-    return data["to_admin"].get(f"{user_chat_id}_{user_reply_to_msg_id}")
-
-async def set_bot_commands(user_id: int, is_adm: bool):
-    commands = [
-        types.BotCommand(command="start", description="🚀 Перезапустить бота"),
-        types.BotCommand(command="ai", description="🤖 Режим нейросети"),
-        types.BotCommand(command="dice", description="🎲 Игра в кости"),
-    ]
-    if is_adm: commands.append(types.BotCommand(command="admin", description="🔑 Панель управления"))
-    try: await bot.set_my_commands(commands, scope=types.BotCommandScopeChat(chat_id=user_id))
-    except Exception: pass
-
-def get_or_set_admin(user_id: int) -> int:
-    if os.path.exists(ADMIN_FILE):
-        with open(ADMIN_FILE, "r") as f:
-            c = f.read().strip()
-            if c.isdigit(): return int(c)
-    with open(ADMIN_FILE, "w") as f: 
-        f.write(str(user_id))
-    return user_id
-
-def is_admin(user_id: int) -> bool:
-    if not os.path.exists(ADMIN_FILE): return False
-    with open(ADMIN_FILE, "r") as f:
-        c = f.read().strip()
-        return c.isdigit() and int(c) == user_id
-
-def get_admin_id() -> int:
-    if os.path.exists(ADMIN_FILE):
-        with open(ADMIN_FILE, "r") as f:
-            c = f.read().strip()
-            if c.isdigit(): return int(c)
-    return 0
-
-def save_user(user_id: int):
-    if not os.path.exists(USERS_FILE):
-        with open(USERS_FILE, "w") as f: f.write(f"{user_id}\n")
-        return
-    with open(USERS_FILE, "r") as f: users = f.read().splitlines()
-    if str(user_id) not in users:
-        with open(USERS_FILE, "a") as f: f.write(f"{user_id}\n")
-
-def get_all_users() -> list:
-    if not os.path.exists(USERS_FILE): return []
-    with open(USERS_FILE, "r") as f: return f.read().splitlines()
-
-async def request_openrouter_inline(prompt: str) -> str:
-    payload = {
-        "model": "openrouter/auto", 
-        "messages": [{"role": "user", "content": prompt}]
-    }
-    headers = {"Authorization": f"Bearer {OPENROUTER_KEY}", "Content-Type": "application/json"}
-    try:
-        connector = TCPConnector(use_dns_cache=False)
-        async with ClientSession(timeout=ClientTimeout(total=30), connector=connector) as session:
-            async with session.post(OPENROUTER_ENDPOINT, json=payload, headers=headers) as resp:
-                if resp.status == 200:
-                    result = await resp.json()
-                    return result['choices'][0]['message']['content']
-                return f"⚠️ Ошибка сервера OpenRouter (Код {resp.status})"
-    except Exception as e:
-        return f"⚠️ Не удалось получить ответ: {e}"
-
-# ==============================================================================
-# 3. КЛАВИАТУРЫ
-# ==============================================================================
-def get_main_keyboard(user_id: int):
-    buttons = [
-        [types.KeyboardButton(text="🤖 Общение с ИИ"), types.KeyboardButton(text="🎲 Сыграть в кости")],
-        [types.KeyboardButton(text="✍️ Написать админу")]
-    ]
-    if is_admin(user_id): buttons.append([types.KeyboardButton(text="🔑 Админ Панель")])
-    return types.ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
-
-def get_ai_keyboard():
-    buttons = [
-        [types.KeyboardButton(text="⚙️ Выбрать нейросеть")],
-        [types.KeyboardButton(text="❌ Выйти из режима ИИ")]
-    ]
-    return types.ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
-
-def get_support_keyboard():
-    return types.ReplyKeyboardMarkup(keyboard=[[types.KeyboardButton(text="❌ Выйти из диалога")]], resize_keyboard=True)
-
-def get_admin_keyboard():
-    buttons = [
-        [types.KeyboardButton(text="📊 Статистика"), types.KeyboardButton(text="📢 Рассылка всем")],
-        [types.KeyboardButton(text="👤 Написать первому"), types.KeyboardButton(text="🚪 Выйти")]
-    ]
-    return types.ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
-
-# ==============================================================================
-# 4. ФУНКЦИОНАЛ ПОДДЕРЖКИ И АДМИНКИ
-# ==============================================================================
-@dp.message(F.text == "✍️ Написать админу")
-async def enter_support_mode(message: types.Message, state: FSMContext):
-    if is_admin(message.from_user.id):
-        await message.answer("Вы администратор, вам не нужно писать самому себе.")
-        return
-    await state.set_state(BotStates.support_mode)
-    await message.answer("💬 Режим связи с администратором включен. Всё, что вы напишете ниже, будет передано напрямую.", reply_markup=get_support_keyboard())
-
-@dp.message(BotStates.support_mode, F.text == "❌ Выйти из диалога")
-async def exit_support_mode(message: types.Message, state: FSMContext):
-    await state.clear()
-    await message.answer("Вы вышли из режима связи с администратором.", reply_markup=get_main_keyboard(message.from_user.id))
-
-@dp.message(BotStates.support_mode)
-async def handle_user_chat_to_admin(message: types.Message):
-    adm_id = get_admin_id()
-    if not adm_id: return
-
-    username = f"@{message.from_user.username}" if message.from_user.username else "Нет юзернейма"
-    header = f"📬 **Сообщение от:** {message.from_user.full_name} ({username})\n🆔 ID: `{message.from_user.id}`\n\n"
-    
-    target_reply_id = None
-    if message.reply_to_message:
-        target_reply_id = get_admin_msg_id_by_user_reply(message.chat.id, message.reply_to_message.message_id)
-
-    try:
-        if message.text:
-            adm_msg = await bot.send_message(chat_id=adm_id, text=f"{header}{message.text}", reply_to_message_id=target_reply_id, parse_mode="Markdown")
-        else:
-            adm_msg = await bot.copy_message(chat_id=adm_id, from_chat_id=message.chat.id, message_id=message.message_id, caption=f"{header}{(message.caption or '')}", reply_to_message_id=target_reply_id, parse_mode="Markdown")
-        register_msg_relation(message.chat.id, message.message_id, adm_msg.message_id)
-    except Exception as e: print(f"Ошибка пересылки: {e}")
-
-@dp.message(F.private, F.reply_to_message)
-async def handle_admin_reply_to_user(message: types.Message):
-    if not is_admin(message.from_user.id): return
-    destination = get_destination_by_admin_reply(message.reply_to_message.message_id)
-    if not destination: return
-        
-    user_chat_id = destination["chat_id"]
-    user_orig_msg_id = destination["msg_id"]
-    
-    try:
-        if message.text:
-            user_msg = await bot.send_message(chat_id=user_chat_id, text=message.text, reply_to_message_id=user_orig_msg_id)
-        else:
-            user_msg = await bot.copy_message(chat_id=user_chat_id, from_chat_id=message.chat.id, message_id=message.message_id, reply_to_message_id=user_orig_msg_id)
-        register_msg_relation(user_chat_id, user_msg.message_id, message.message_id)
-    except Exception as e: await message.answer(f"❌ Ошибка отправки: {e}")
-
-@dp.message(CommandStart())
-async def cmd_start(message: types.Message, state: FSMContext):
-    await state.clear()
-    save_user(message.from_user.id)
-    current_admin = get_or_set_admin(message.from_user.id)
-    await set_bot_commands(message.from_user.id, current_admin == message.from_user.id)
-    await message.answer("👋 Привет! Я твой мультифункциональный бот Иван Факен.\nВ режиме ИИ я умею работать с текстом, фото и аудио!", reply_markup=get_main_keyboard(message.from_user.id), parse_mode="Markdown")
-
-# ==============================================================================
-# ИГРА В КОСТИ
-# ==============================================================================
-@dp.message(Command("dice"))
-@dp.message(F.text == "🎲 Сыграть в кости")
-async def handle_dice(message: types.Message):
-    await message.answer("🎲 Бросок Ивана Факена:")
-    bot_msg = await message.answer_dice()
-    await asyncio.sleep(3)
-    await message.answer("🎲 Твой бросок:")
-    user_msg = await message.answer_dice()
-    await asyncio.sleep(3)
-    
-    b_val = bot_msg.dice.value
-    u_val = user_msg.dice.value
-    
-    res = f"🎲 **Иван Факен:** `{b_val}` vs **Ты:** `{u_val}`\n\n"
-    if b_val > u_val:
-        res += f"🔥 {random.choice(WIN_REPLIKAS)}"
-    elif u_val > b_val:
-        res += f"🎉 {random.choice(LOSE_REPLIKAS)}"
-    else:
-        res += f"🤝 {random.choice(DRAW_REPLIKAS)}"
-        
-    await message.answer(res, parse_mode="Markdown")
-
-@dp.message(Command("admin"))
-@dp.message(F.text == "🔑 Админ Панель")
-async def cmd_admin(message: types.Message):
-    if not is_admin(message.from_user.id): return
-    await message.answer("🔑 Панель управления открыта!", reply_markup=get_admin_keyboard())
-
-@dp.message(F.text == "🚪 Выйти")
-async def exit_admin(message: types.Message):
-    if not is_admin(message.from_user.id): return
-    await message.answer("Вы вышли из панели управления.", reply_markup=get_main_keyboard(message.from_user.id))
-
-@dp.message(F.text == "📊 Статистика")
-async def admin_stats(message: types.Message):
-    if not is_admin(message.from_user.id): return
-    await message.answer(f"📊 **Всего юзеров в базе:** `{len(get_all_users())}`", parse_mode="Markdown")
-
-@dp.message(F.text == "👤 Написать первому")
-async def admin_choose_user_start(message: types.Message, state: FSMContext):
-    if not is_admin(message.from_user.id): return
-    users = get_all_users()
-    if not users: return
-    builder = InlineKeyboardBuilder()
-    for u_id in users[-10:]: builder.button(text=f"Юзер {u_id}", callback_data=f"init_{u_id}")
-    builder.adjust(1)
-    await message.answer("Выберите пользователя:", reply_markup=builder.as_markup())
-    await state.set_state(BotStates.admin_init_chat_id)
-
-@dp.message(BotStates.admin_init_chat_id)
-async def admin_get_custom_id(message: types.Message, state: FSMContext):
-    if not message.text.isdigit(): return
-    await state.update_data(chosen_id=message.text)
-    await state.set_state(BotStates.admin_init_chat_msg)
-    await message.answer(f"Напишите сообщение для `{message.text}`:")
-
-@dp.callback_query(F.data.startswith("init_"))
-async def admin_callback_init_id(callback: types.CallbackQuery, state: FSMContext):
-    u_id = callback.data.split("_")[1]
-    await state.update_data(chosen_id=u_id)
-    await state.set_state(BotStates.admin_init_chat_msg)
-    await callback.message.answer(f"Выбран пользователь `{u_id}`. Напишите сообщение:")
-    await callback.answer()
-
-@dp.message(BotStates.admin_init_chat_msg)
-async def admin_send_init_msg(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    u_id = int(data.get("chosen_id"))
-    await state.clear()
-    try:
-        user_msg = await bot.send_message(chat_id=u_id, text=f"✉️ **Сообщение от администратора:**\n\n{message.text}", parse_mode="Markdown")
-        register_msg_relation(u_id, user_msg.message_id, message.message_id)
-        await message.answer("✅ Сообщение доставлено!")
-    except Exception as e: await message.answer(f"❌ Ошибка: {e}")
-    await message.answer("Возврат в меню панели:", reply_markup=get_admin_keyboard())
-
-@dp.message(F.text == "📢 Рассылка всем")
-async def broadcast_start(message: types.Message, state: FSMContext):
-    if not is_admin(message.from_user.id): return
-    await state.set_state(BotStates.admin_broadcast)
-    await message.answer("Введите text рассылки (или /cancel):")
-
-@dp.message(BotStates.admin_broadcast)
-async def broadcast_exec(message: types.Message, state: FSMContext):
-    if message.text == "/cancel":
-        await state.clear()
-        await message.answer("Отменено.", reply_markup=get_admin_keyboard())
-        return
-    await state.clear()
-    users = get_all_users()
-    s, f = 0, 0
-    for u in users:
-        try:
-            await bot.send_message(chat_id=int(u), text=message.text)
-            s += 1
-            await asyncio.sleep(0.04)
-        except Exception: f += 1
-    await message.answer(f"📢 Выполнено!\nУспешно: `{s}`\nОшибок: `{f}`", reply_markup=get_admin_keyboard(), parse_mode="Markdown")
-
-# ==============================================================================
-# 5. СУПЕР ИНЛАЙН-РЕЖИМ
-# ==============================================================================
-@dp.inline_query()
-async def inline_ai_query(inline_query: types.InlineQuery):
-    query_text = inline_query.query.strip()
-    results = []
-    
-    b_val = random.randint(1, 6)
-    u_val = random.randint(1, 6)
-    dice_icons = {1: "⚀", 2: "⚁", 3: "⚂", 4: "⚃", 5: "⚄", 6: "⚅"}
-    
-    dice_res = f"🎲 **БРОСОК В ЛЮБОМ ЧАТЕ** 🎲\n\nИван Факен:  `{b_val}`  {dice_icons[b_val]}\nТы:  `{u_val}`  {dice_icons[u_val]}\n\n"
-    if b_val > u_val: dice_res += f"🔥 {random.choice(WIN_REPLIKAS)}"
-    elif u_val > b_val: dice_res += f"🎉 {random.choice(LOSE_REPLIKAS)}"
-    else: dice_res += f"🤝 {random.choice(DRAW_REPLIKAS)}"
-        
-    results.append(
-        types.InlineQueryResultArticle(
-            id="inline_dice_" + str(random.randint(1000, 9999)),
-            title="🎲 Бросить кости с Иваном Факеным",
-            description="Сыграть в кости прямо в этом чате и получить порцию сарказма",
-            input_message_content=types.InputTextMessageContent(message_text=dice_res, parse_mode="Markdown")
-        )
+def user_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=BTN_CHAT)],
+            [KeyboardButton(text=BTN_LUCK), KeyboardButton(text=BTN_BURMALDA)],
+            [KeyboardButton(text=BTN_MALFOY)],
+            [KeyboardButton(text=BTN_START)],
+        ],
+        resize_keyboard=True,
+        input_field_placeholder="Выбери действие...",
     )
 
-    if query_text:
-        ai_answer = await request_openrouter_inline(query_text)
-        results.append(
-            types.InlineQueryResultArticle(
-                id="inline_ai_" + str(random.randint(1000, 9999)),
-                title="🤖 Ответить через ИИ (Auto)",
-                description=f"Запрос: {query_text[:40]}...",
-                input_message_content=types.InputTextMessageContent(
-                    message_text=f"❓ **Запрос:** {query_text}\n\n🤖 **Ответ ИИ:**\n{ai_answer}",
-                    parse_mode="Markdown"
-                )
-            )
-        )
-        
-    await inline_query.answer(results, cache_time=2, is_personal=True)
+def chat_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=BTN_STOP)],
+        ],
+        resize_keyboard=True,
+        input_field_placeholder="Напиши сообщение поддержке...",
+    )
 
-# ==============================================================================
-# 6. ДВУХУРОВНЕВОЕ МЕНЮ ВЫБОРА НЕЙРОСЕТЕЙ
-# ==============================================================================
-@dp.message(BotStates.ai_mode, F.text == "⚙️ Выбрать нейросеть")
-async def select_ai_menu(message: types.Message):
-    builder = InlineKeyboardBuilder()
-    builder.button(text="🌐 Раздел OpenRouter API", callback_data="prov_openrouter")
-    builder.button(text="🤗 Раздел Повышенной Стабильности", callback_data="prov_huggingface")
-    builder.adjust(1)
-    await message.answer("Выбери провайдера нейросетей:", reply_markup=builder.as_markup())
+def admin_panel_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="📊 Статистика", callback_data="stats"),
+            InlineKeyboardButton(text="👥 Пользователи", callback_data="users_p:0"),
+        ],
+        [
+            InlineKeyboardButton(text="✏️ Изменить приветствие", callback_data="edit_greeting"),
+            InlineKeyboardButton(text="👁 Показать приветствие", callback_data="show_greeting"),
+        ],
+    ])
 
-@dp.callback_query(F.data.startswith("prov_"))
-async def select_provider_models(callback: types.CallbackQuery):
-    provider = callback.data.split("_")[1]
-    builder = InlineKeyboardBuilder()
-    models = MODELS_DATABASE.get(provider, {})
-    
-    for m_id, name in models.items():
-        short = m_id.split("/")[-1].replace(":free", "")[:20]
-        builder.button(text=name, callback_data=f"set_{short}")
-        
-    builder.button(text="⬅️ Назад к провайдерам", callback_data="back_to_providers")
-    builder.adjust(1)
-    
-    text_title = "🤖 Модели OpenRouter:" if provider == "openrouter" else "🤗 Стабильные текстовые альтернативы и арт-генераторы:"
-    await callback.message.edit_text(text_title, reply_markup=builder.as_markup())
-    await callback.answer()
+def users_page_keyboard(page: int, total_pages: int) -> InlineKeyboardMarkup:
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="◀️", callback_data=f"users_p:{page - 1}"))
+    nav.append(InlineKeyboardButton(text=f"{page + 1}/{total_pages}", callback_data="noop"))
+    if page < total_pages - 1:
+        nav.append(InlineKeyboardButton(text="▶️", callback_data=f"users_p:{page + 1}"))
+    return InlineKeyboardMarkup(inline_keyboard=[
+        nav,
+        [InlineKeyboardButton(text="↩️ Панель", callback_data="back_panel")],
+    ])
 
-@dp.callback_query(F.data == "back_to_providers")
-async def back_to_providers(callback: types.CallbackQuery):
-    builder = InlineKeyboardBuilder()
-    builder.button(text="🌐 Раздел OpenRouter API", callback_data="prov_openrouter")
-    builder.button(text="🤗 Раздел Повышенной Стабильности", callback_data="prov_huggingface")
-    builder.adjust(1)
-    await callback.message.edit_text("Выбери провайдера нейросетей:", reply_markup=builder.as_markup())
-    await callback.answer()
+# ──────────────────────────────────────────────
+# Функция запроса к OpenRouter (Llama)
+# ──────────────────────────────────────────────
 
-@dp.callback_query(F.data.startswith("set_"))
-async def save_ai_selection(callback: types.CallbackQuery, state: FSMContext):
-    short = callback.data.split("_")[1]
-    full = "openrouter/auto"
-    found_name = "🤖 Автовыбор OpenRouter"
-    
-    for provider in MODELS_DATABASE.values():
-        for m_id, name in provider.items():
-            if short in m_id:
-                full = m_id
-                found_name = name
-                break
+async def get_malfoy_response() -> str:
+    """Запрашивает ответ от Llama через OpenRouter API"""
+    if not OPENROUTER_API_KEY:
+        return "Простите, мой фамильяр временно недоступен. Даже у Малфоев бывают технические неполадки."
 
-    await state.update_data(current_model=full)
-    await callback.message.edit_text(f"✅ Модель успешно изменена на:\n**{found_name}**", parse_mode="Markdown")
-    await callback.answer()
-
-# ==============================================================================
-# 7. ОСНОВНОЙ ОБРАБОТЧИК ИИ С АВТОПЕРЕНАПРАВЛЕНИЕМ
-# ==============================================================================
-@dp.message(Command("ai"))
-@dp.message(F.text == "🤖 Общение с ИИ")
-async def start_ai(message: types.Message, state: FSMContext):
-    await state.set_state(BotStates.ai_mode)
-    data = await state.get_data()
-    model = data.get("current_model", "openrouter/auto")
-    
-    found_name = "🤖 Автовыбор OpenRouter"
-    for provider in MODELS_DATABASE.values():
-        if model in provider:
-            found_name = provider[model]
-            break
-            
-    await message.answer(f"🤖 Режим ИИ запущен!\nТекущая модель: {found_name}", reply_markup=get_ai_keyboard())
-
-@dp.message(BotStates.ai_mode, F.text == "❌ Выйти из режима ИИ")
-async def exit_ai(message: types.Message, state: FSMContext):
-    await state.clear()
-    await message.answer("Вы вышли из режима ИИ.", reply_markup=get_main_keyboard(message.from_user.id))
-
-@dp.message(BotStates.ai_mode)
-async def ai_multimedia_handler(message: types.Message, state: FSMContext):
-    if message.text in ["❌ Выйти из режима ИИ", "⚙️ Выбрать нейросеть"]: return
-
-    user_data = await state.get_data()
-    chosen_model = user_data.get("current_model", "openrouter/auto")
-    
-    has_photo_video = bool(message.photo or message.video or message.video_note)
-    has_voice = bool(message.voice)
-
-    if has_photo_video and chosen_model not in VISION_MODELS:
-        await message.answer("⚠️ Выбранная нейросеть **не поддерживает чтение изображений**. Пожалуйста, выберите модель с пометкой `[👁 Vision]` или отправьте обычный текст.", parse_mode="Markdown")
-        return
-
-    if has_voice and chosen_model not in VOICE_MODELS:
-        await message.answer("⚠️ Эта модель **не умеет слушать голос**. Пожалуйста, переключитесь на модель с пометкой `[🎙 Voice]` (например, Nemotron Omni).", parse_mode="Markdown")
-        return
-
-    prompt_text = message.text or message.caption or "Опиши и проанализируй этот файл."
-    connector = TCPConnector(use_dns_cache=False)
-
-    # --------------------------------------------------------------------------
-    # СХЕМА РАБОТЫ FLUX.2-dev (ГЕНЕРАЦИЯ КАРТИНОК НА ХОСТИНГЕ HF)
-    # --------------------------------------------------------------------------
-    if chosen_model == "hf/black-forest-labs/FLUX.2-dev":
-        if has_photo_video or has_voice:
-            await message.answer("⚠️ FLUX принимает **только текстовое описание** (промпт) для создания картинки.")
-            return
-            
-        await bot.send_chat_action(chat_id=message.chat.id, action="upload_photo")
-        status_msg = await message.answer("🎨 *Иван Факен запускает генератор картинок...* ⏳", parse_mode="Markdown")
-        
-        # Используем стандартный домен. Если у Render упал DNS до HF, картинки временно не сгенерируются, но чат не упадет!
-        hf_img_url = "https://api-inference.huggingface.co/models/black-forest-labs/FLUX.2-dev"
-        headers = {"Authorization": f"Bearer {HF_KEY}", "Content-Type": "application/json"}
-        payload = {"inputs": prompt_text}
-        
-        try:
-            async with ClientSession(timeout=ClientTimeout(total=60), connector=connector) as session:
-                async with session.post(hf_img_url, json=payload, headers=headers) as resp:
-                    if resp.status == 200:
-                        photo_bytes = await resp.read()
-                        await status_msg.delete()
-                        await message.answer_photo(
-                            photo=types.BufferedInputFile(photo_bytes, filename="flux.jpg"),
-                            caption=f"🎨 Салон ИИ Ивана Факена.\nПромпт: _{prompt_text}_",
-                            parse_mode="Markdown"
-                        )
-                        return
-                    else:
-                        await status_msg.edit_text(f"⚠️ Ошибка генерации (Код {resp.status}). Провайдер перегружен, попробуйте позже.")
-                        return
-        except Exception as e:
-            await status_msg.edit_text(f"⚠️ Проблема с сетью при доступе к генератору: {e}")
-            return
-
-    # --------------------------------------------------------------------------
-    # СХЕМА ТЕКСТОВОГО СТРИМИНГА ЧЕРЕЗ СТАБИЛЬНЫЙ OPENROUTER
-    # --------------------------------------------------------------------------
-    await bot.send_chat_action(chat_id=message.chat.id, action="typing")
-    status_msg = await message.answer("⚡ *Считываю входящие данные...* 🔍", parse_mode="Markdown")
-
-    base64_image = ""
-    if message.photo:
-        await status_msg.edit_text("📸 *Обрабатываю изображение...* ⚙️", parse_mode="Markdown")
-        base64_image = await download_file_as_base64(message.photo[-1].file_id)
-    elif message.video or message.video_note:
-        await status_msg.edit_text("🎬 *Анализирую кадры видео...* ⚙️", parse_mode="Markdown")
-        file_id = message.video.thumb.file_id if (message.video and message.video.thumb) else (message.video_note.thumbnail.file_id if (message.video_note and message.video_note.thumbnail) else None)
-        if file_id: base64_image = await download_file_as_base64(file_id)
-        else:
-            await status_msg.edit_text("⚠️ Не удалось извлечь кадр видео.")
-            return
-    elif message.voice:
-        await status_msg.edit_text("🎙 *Скачиваю аудио для Omni-модели...* 💬", parse_mode="Markdown")
-        base64_audio = await download_file_as_base64(message.voice.file_id)
-        if base64_audio: 
-            prompt_text = "Пользователь отправил голосовое сообщение. Ответь на него напрямую."
-        else:
-            await status_msg.edit_text("⚠️ Ошибка обработки аудио.")
-            return
-
-    if not base64_image:
-        final_content = prompt_text
-    else:
-        final_content = [
-            {"type": "text", "text": prompt_text},
-            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
-        ]
-
-    # Маршрутизируем и перенаправляем "проблемные" текстовые модели Hugging Face на стабильный OpenRouter
-    if chosen_model.startswith("or/"):
-        actual_model = chosen_model.replace("or/", "")
-    else:
-        actual_model = chosen_model
-
-    current_endpoint = OPENROUTER_ENDPOINT
-    headers = {"Authorization": f"Bearer {OPENROUTER_KEY}", "Content-Type": "application/json"}
-
-    payload = {
-        "model": actual_model, 
-        "messages": [{"role": "user", "content": final_content}],
-        "stream": True  
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json",
     }
     
-    full_response = ""
-    last_text = ""
-    update_interval = 0.6 
-    last_update_time = asyncio.get_event_loop().time()
-    cursors = [" ⏳", " ⚡", " 🤖"]
+    payload = {
+        "model": "meta-llama/llama-3.2-3b-instruct:free",
+        "messages": [
+            {
+                "role": "system",
+                "content": MALFOY_PROMPT
+            },
+            {
+                "role": "user", 
+                "content": "Скажи что-нибудь в своём стиле, Люциус."
+            }
+        ],
+        "max_tokens": 150,
+        "temperature": 0.9,
+    }
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers=headers,
+                json=payload,
+                timeout=15
+            ) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    return data["choices"][0]["message"]["content"].strip()
+                else:
+                    logger.error(f"OpenRouter API error: {response.status}")
+                    return "Очевидно, даже нейросети боятся меня. Попробуйте позже, когда она соберётся с духом."
+    except asyncio.TimeoutError:
+        logger.error("OpenRouter API timeout")
+        return "Я не намерен ждать вечность. Нейросеть, видимо, решила, что может игнорировать Малфоя. Непростительно."
+    except Exception as e:
+        logger.error(f"OpenRouter API error: {e}")
+        return "Кажется, какая-то грязнокровка сломала мою магию. Попробуйте позже."
+
+# ──────────────────────────────────────────────
+# Хэндлеры команд
+# ──────────────────────────────────────────────
+
+@dp.message(CommandStart(), is_admin_filter)
+async def cmd_start_admin(message: Message) -> None:
+    global admin_chat_id
+    admin_chat_id = message.chat.id
+    await setup_commands()
+    await message.answer(
+        f"👋 Админ-панель активна.\n"
+        f"Твой chat ID: <code>{message.chat.id}</code>\n\n"
+        "Сообщения пользователей приходят, когда они активируют режим поддержки. "
+        "Отвечай реплаем на сообщение — ответ уйдёт пользователю.\n\n"
+        "Используй /panel для управления ботом.",
+        parse_mode="HTML",
+    )
+
+@dp.message(CommandStart(), is_user_filter)
+async def cmd_start_user(message: Message) -> None:
+    await message.answer(greeting_text, reply_markup=user_keyboard())
+
+async def enter_chat(message: Message) -> None:
+    active_chat_users.add(message.chat.id)
+    await message.answer(
+        "О, приватный чат. Ты либо очень смелый, либо очень отчаянный. "
+        "В любом случае — я впечатлён твоей наглостью. Спрашивай. "
+        "Но не жалуйся потом, что не предупредил.",
+        reply_markup=chat_keyboard()
+    )
+    if admin_chat_id:
+        user = message.from_user
+        uname = f"@{user.username}" if user.username else "(без username)"
+        await bot.send_message(
+            admin_chat_id,
+            f"🟢 <b>{user.full_name}</b> {uname} начал диалог — отвечай реплаем.",
+            parse_mode="HTML",
+        )
+
+async def leave_chat(message: Message) -> None:
+    active_chat_users.discard(message.chat.id)
+    await message.answer("Диалог завершен.", reply_markup=user_keyboard())
+    if admin_chat_id:
+        user = message.from_user
+        uname = f"@{user.username}" if user.username else "(без username)"
+        await bot.send_message(
+            admin_chat_id,
+            f"🔴 <b>{user.full_name}</b> {uname} завершил диалог.",
+            parse_mode="HTML",
+        )
+
+@dp.message(Command("chat"), is_user_filter)
+async def cmd_chat(message: Message) -> None:
+    if message.chat.id in active_chat_users:
+        await leave_chat(message)
+    else:
+        await enter_chat(message)
+
+@dp.message(is_user_filter, F.text == BTN_CHAT)
+async def btn_enter_chat(message: Message) -> None:
+    await enter_chat(message)
+
+@dp.message(is_user_filter, F.text == BTN_STOP)
+async def btn_leave_chat(message: Message) -> None:
+    await leave_chat(message)
+
+@dp.message(Command("panel"), is_admin_filter)
+async def cmd_panel(message: Message) -> None:
+    global admin_chat_id
+    admin_chat_id = message.chat.id
+    await message.answer(
+        "⚙️ <b>Панель управления</b>",
+        parse_mode="HTML",
+        reply_markup=admin_panel_keyboard(),
+    )
+
+# ──────────────────────────────────────────────
+# Коллбэки админ-панели
+# ──────────────────────────────────────────────
+
+@dp.callback_query(F.data == "stats")
+async def cb_stats(callback: CallbackQuery) -> None:
+    await callback.answer()
+    total_users = len(users)
+    if total_users == 0:
+        text = "📊 <b>Статистика</b>\n\nПока нет ни одного пользователя."
+    else:
+        top = sorted(users.values(), key=lambda u: u.msg_count, reverse=True)[:5]
+        top_lines = "\n".join(
+            f"  {i+1}. {u.full_name} — {u.msg_count} сообщ."
+            for i, u in enumerate(top)
+        )
+        last_active = max(users.values(), key=lambda u: u.last_seen)
+        text = (
+            f"📊 <b>Статистика</b>\n\n"
+            f"👥 Пользователей: <b>{total_users}</b>\n"
+            f"💬 Сообщений всего: <b>{total_messages}</b>\n"
+            f"🟢 В чате сейчас: <b>{len(active_chat_users)}</b>\n"
+            f"🕐 Последний активный: <b>{last_active.full_name}</b> "
+            f"({last_active.last_seen.strftime('%d.%m %H:%M')})\n\n"
+            f"🏆 <b>Топ по сообщениям:</b>\n{top_lines}"
+        )
+    await callback.message.answer(
+        text,
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="↩️ Панель", callback_data="back_panel")]
+        ]),
+    )
+
+@dp.callback_query(F.data.startswith("users_p:"))
+async def cb_users_page(callback: CallbackQuery) -> None:
+    await callback.answer()
+    page = int(callback.data.split(":")[1])
+    sorted_users = sorted(users.values(), key=lambda u: u.last_seen, reverse=True)
+    total_pages = max(1, (len(sorted_users) + USERS_PER_PAGE - 1) // USERS_PER_PAGE)
+    page = max(0, min(page, total_pages - 1))
+    chunk = sorted_users[page * USERS_PER_PAGE:(page + 1) * USERS_PER_PAGE]
+
+    if not chunk:
+        text = "👥 <b>Пользователи</b>\n\nПока нет ни одного пользователя."
+        markup = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="↩️ Панель", callback_data="back_panel")]
+        ])
+    else:
+        lines = []
+        for u in chunk:
+            uname = f"@{u.username}" if u.username else "(без username)"
+            status = "🟢" if u.chat_id in active_chat_users else "⚫️"
+            lines.append(
+                f"{status} <b>{u.full_name}</b> {uname}\n"
+                f"  💬 {u.msg_count} сообщ. | 🕐 {u.last_seen.strftime('%d.%m %H:%M')}"
+            )
+        text = f"👥 <b>Пользователи</b>\n\n" + "\n\n".join(lines)
+        markup = users_page_keyboard(page, total_pages)
+
+    await callback.message.answer(text, parse_mode="HTML", reply_markup=markup)
+
+@dp.callback_query(F.data == "back_panel")
+async def cb_back_panel(callback: CallbackQuery) -> None:
+    await callback.answer()
+    await callback.message.answer(
+        "⚙️ <b>Панель управления</b>",
+        parse_mode="HTML",
+        reply_markup=admin_panel_keyboard(),
+    )
+
+@dp.callback_query(F.data == "noop")
+async def cb_noop(callback: CallbackQuery) -> None:
+    await callback.answer()
+
+@dp.callback_query(F.data == "show_greeting")
+async def cb_show_greeting(callback: CallbackQuery) -> None:
+    await callback.answer()
+    await callback.message.answer(
+        f"📝 <b>Текущее приветствие:</b>\n\n{greeting_text}",
+        parse_mode="HTML",
+    )
+
+@dp.callback_query(F.data == "edit_greeting")
+async def cb_edit_greeting(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    await callback.message.answer(
+        "✏️ Отправь новый текст приветствия.\n"
+        "Пользователи увидят его при команде /start.\n\n"
+        "/cancel — отмена",
+    )
+    await state.set_state(AdminStates.waiting_for_greeting)
+
+@dp.message(Command("cancel"), AdminStates.waiting_for_greeting)
+async def cmd_cancel(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer("❌ Отменено.", reply_markup=admin_panel_keyboard())
+
+@dp.message(AdminStates.waiting_for_greeting)
+async def receive_new_greeting(message: Message, state: FSMContext) -> None:
+    global greeting_text
+    greeting_text = message.text or greeting_text
+    await state.clear()
+    await message.answer(
+        f"✅ Приветствие обновлено!\n\n<b>Новое приветствие:</b>\n{greeting_text}",
+        parse_mode="HTML",
+        reply_markup=admin_panel_keyboard(),
+    )
+
+# ──────────────────────────────────────────────
+# Ответ админа пользователю
+# ──────────────────────────────────────────────
+
+@dp.message(is_admin_filter, F.reply_to_message)
+async def handle_admin_reply(message: Message) -> None:
+    replied_id = message.reply_to_message.message_id
+    user_chat_id = forward_map.get(replied_id)
+
+    if user_chat_id is None:
+        await message.answer("⚠️ Не удалось найти пользователя для этого сообщения.")
+        return
 
     try:
-        async with ClientSession(timeout=ClientTimeout(total=None), connector=connector) as session:
-            async with session.post(current_endpoint, json=payload, headers=headers) as response:
-                if response.status != 200:
-                    await status_msg.edit_text(f"⚠️ Ошибка API OpenRouter (Код {response.status}).")
-                    return
-
-                async for line in response.content:
-                    if not line: continue
-                    decoded = line.decode('utf-8').strip()
-                    if not decoded.startswith("data:"): continue
-                    cleaned = decoded[5:].strip()
-                    if cleaned == "[DONE]": break
-                        
-                    try:
-                        chunk = json.loads(cleaned)
-                        content = chunk['choices'][0].get('delta', {}).get('content', '')
-                        full_response += content
-                        
-                        current_time = asyncio.get_event_loop().time()
-                        if current_time - last_update_time > update_interval:
-                            animated_text = full_response + random.choice(cursors)
-                            if animated_text.strip() != last_text:
-                                try:
-                                    await status_msg.edit_text(animated_text[:4000], parse_mode="Markdown")
-                                    last_text = animated_text.strip()
-                                    last_update_time = current_time
-                                except Exception:
-                                    try: await status_msg.edit_text(animated_text[:4000])
-                                    except Exception: pass
-                    except Exception: continue
-
-        if full_response.strip():
-            try: await status_msg.edit_text(full_response, parse_mode="Markdown")
-            except Exception: await status_msg.edit_text(full_response)
+        kb = chat_keyboard() if user_chat_id in active_chat_users else ReplyKeyboardRemove()
+        if message.text:
+            await bot.send_message(chat_id=user_chat_id, text=message.text, reply_markup=kb)
+        elif message.photo:
+            await bot.send_photo(chat_id=user_chat_id, photo=message.photo[-1].file_id, caption=message.caption, reply_markup=kb)
+        elif message.document:
+            await bot.send_document(chat_id=user_chat_id, document=message.document.file_id, caption=message.caption, reply_markup=kb)
+        elif message.voice:
+            await bot.send_voice(chat_id=user_chat_id, voice=message.voice.file_id, caption=message.caption, reply_markup=kb)
         else:
-            await status_msg.edit_text("⚠️ Ответ от ИИ пуст.")
+            await message.answer("Данный тип медиа пока не поддерживается для отправки ответа.")
+            return
+        await message.answer("✅ Ответ отправлен.")
     except Exception as e:
-        await status_msg.edit_text(f"⚠️ Ошибка сети: {e}")
+        await message.answer(f"❌ Ошибка отправки: {e}")
 
-# ==============================================================================
-# 8. СТАРТ СЕРВЕРА И БОТА
-# ==============================================================================
-async def handle_ping(request): return web.Response(text="Бот онлайн!", status=200)
+# ──────────────────────────────────────────────
+# Пересылка сообщений админу
+# ──────────────────────────────────────────────
 
-async def main():
-    app = web.Application()
-    app.router.add_get('/', handle_ping)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    await web.TCPSite(runner, host='0.0.0.0', port=PORT).start()
-    try: await dp.start_polling(bot)
-    finally: await runner.cleanup()
+def track_user(message: Message) -> None:
+    global total_messages
+    user = message.from_user
+    if not user:
+        return
+    now = datetime.now()
+    if user.id not in users:
+        users[user.id] = UserInfo(
+            chat_id=message.chat.id,
+            full_name=user.full_name,
+            username=user.username,
+            first_seen=now,
+            last_seen=now,
+        )
+    users[user.id].msg_count += 1
+    users[user.id].last_seen = now
+    users[user.id].full_name = user.full_name
+    users[user.id].username = user.username
+    total_messages += 1
 
-if __name__ == '__main__':
+async def forward_to_admin(message: Message) -> None:
+    if admin_chat_id is None:
+        logger.warning("Admin chat ID не задан.")
+        return
+
+    user = message.from_user
+    username_part = f"@{user.username}" if user.username else "(без username)"
+
+    reply_context = ""
+    if message.reply_to_message:
+        quoted = (
+            message.reply_to_message.text
+            or message.reply_to_message.caption
+            or "(медиа)"
+        )
+        reply_context = f"↩️ <i>В ответ на:</i> «{quoted[:100]}»\n\n"
+
+    header = (
+        f"📨 <b>{user.full_name}</b> {username_part}\n"
+        f"ID: <code>{user.id}</code>\n\n"
+        f"{reply_context}"
+    )
+
+    try:
+        if message.text:
+            sent = await bot.send_message(chat_id=admin_chat_id, text=header + message.text, parse_mode="HTML")
+        elif message.photo:
+            sent = await bot.send_photo(chat_id=admin_chat_id, photo=message.photo[-1].file_id, caption=header + (message.caption or ""), parse_mode="HTML")
+        elif message.document:
+            sent = await bot.send_document(chat_id=admin_chat_id, document=message.document.file_id, caption=header + (message.caption or ""), parse_mode="HTML")
+        elif message.voice:
+            sent = await bot.send_voice(chat_id=admin_chat_id, voice=message.voice.file_id, caption=header + (message.caption or ""), parse_mode="HTML")
+        elif message.sticker:
+            await bot.send_message(chat_id=admin_chat_id, text=header + f"[Стикер: {message.sticker.emoji or ''}]", parse_mode="HTML")
+            sent = await bot.send_sticker(chat_id=admin_chat_id, sticker=message.sticker.file_id)
+        else:
+            sent = await bot.send_message(chat_id=admin_chat_id, text=header + "[Неподдерживаемый тип сообщения]", parse_mode="HTML")
+
+        forward_map[sent.message_id] = message.chat.id
+
+    except Exception as e:
+        logger.error(f"Failed to forward message: {e}")
+
+# ──────────────────────────────────────────────
+# Пользовательские функции и игра
+# ──────────────────────────────────────────────
+
+@dp.message(is_user_filter, F.text == BTN_START)
+async def btn_start(message: Message) -> None:
+    await message.answer(greeting_text, reply_markup=user_keyboard())
+
+@dp.message(is_user_filter, F.text == BTN_LUCK)
+async def btn_luck(message: Message) -> None:
+    await cmd_luck(message)
+
+@dp.message(Command("luck"))
+async def cmd_luck(message: Message) -> None:
+    try:
+        await message.answer(
+            "Ты действительно хочешь рискнуть? Против меня? Это не риск. Это самоубийство. "
+            "Но я люблю зрителей. Especially тех, кто проигрывает красиво. "
+            "Давай. Покажи мне, как ты падаешь."
+        )
+        user_dice = await bot.send_dice(chat_id=message.chat.id, emoji="🎲")
+        bot_dice = await bot.send_dice(chat_id=message.chat.id, emoji="🎲")
+        await asyncio.sleep(4)
+        u = user_dice.dice.value
+        b = bot_dice.dice.value
+        if u > b:
+            result = (
+                "Что? Ты выиграл? Случайность. Чистая случайность. Не привыкай. "
+                "Это не повторится. Даже если будешь играть до конца жизни. "
+                "И знаешь что? Я дам тебе реванш. Из чистого любопытства. "
+                "Посмотрим, повезёт ли тебе дважды."
+            )
+        elif u < b:
+            result = (
+                "И что я говорил? Ты проиграл. Как и ожидалось. "
+                "Не расстраивайся. Ты не первый. Ты не последний. "
+                "Ты просто очередной, кто попытался бросить вызов Малфою и пожалел об этом."
+            )
+        else:
+            result = (
+                "Ничья? Неожиданно. У тебя есть удача. Или я просто отвлёкся. "
+                "Давай переиграем. Мне не нравится оставлять дела незаконченными. "
+                "Тем более — когда они такие близкие к моей победе."
+            )
+        await message.answer(f"Ты: {u} — Я: {b}\n{result}")
+    except Exception as e:
+        logger.error(f"/luck error: {e}")
+        await message.answer(f"Ошибка: {e}")
+
+@dp.message(is_user_filter, F.text == BTN_BURMALDA)
+async def btn_burmalda(message: Message) -> None:
+    await cmd_burmalda(message)
+
+@dp.message(Command("burmalda"))
+async def cmd_burmalda(message: Message) -> None:
+    try:
+        await message.answer(
+            "Так-так, казино... И всё благодаря Макдональд. Она, видимо, решила, что мне не хватает развлечений. "
+            "Что ж, раз уж ты тут — давай проверим, есть ли у тебя что-то кроме наглости."
+        )
+        msg = await message.answer_dice(emoji="🎰")
+        await asyncio.sleep(3)
+        value = msg.dice.value
+        if value == 64:
+            text = "Джекпот! Ты сорвал куш, хотя я сомневаюсь, что это поможет тебе в жизни."
+        elif value > 40:
+            text = "Неплохо. Почти что-то достойное. Но до моего величия тебе далеко."
+        else:
+            text = "Пусто. Как и в твоих карманах. Типичный результат для такого игрока."
+        await message.answer(text)
+    except Exception as e:
+        logger.error(f"/burmalda error: {e}")
+        await message.answer(f"Ошибка: {e}")
+
+@dp.message(is_user_filter, F.text == BTN_MALFOY)
+async def btn_malfoy(message: Message) -> None:
+    await cmd_malfoy(message)
+
+@dp.message(Command("malfoy"))
+async def cmd_malfoy(message: Message) -> None:
+    """Отправляет сообщение от имени Люциуса Малфоя через Llama"""
+    # Отправляем сообщение о том, что Малфой думает
+    thinking_msg = await message.answer("🐍 *Люциус Малфой поправляет мантию и задумчиво смотрит на тебя...*", parse_mode="Markdown")
+    
+    # Получаем ответ от нейросети
+    malfoy_response = await get_malfoy_response()
+    
+    # Удаляем сообщение "думает" и отправляем ответ
+    await thinking_msg.delete()
+    await message.answer(f"🐍 {malfoy_response}")
+
+@dp.message(is_user_filter, F.text.startswith("/"))
+async def handle_unknown_command(message: Message) -> None:
+    await message.answer(
+        "Ты серьёзно ошибся в команде? Я ожидал большего. Ну ладно. "
+        "Вот тебе список того, что я умею. Не благодари.\n\n"
+        "/start — начать диалог\n"
+        f"/chat — {BTN_CHAT}\n"
+        "/luck — кинуть кость\n"
+        "/burmalda — Бурмалда 🎰\n"
+        "/malfoy — спросить Люциуса Малфоя 🐍"
+    )
+
+@dp.message(is_user_filter)
+async def handle_user_message(message: Message) -> None:
+    # Игнорируем нажатия на системные служебные кнопки
+    if message.text in [BTN_CHAT, BTN_STOP, BTN_LUCK, BTN_BURMALDA, BTN_START, BTN_MALFOY]:
+        return
+        
+    if message.chat.id not in active_chat_users:
+        return
+    track_user(message)
+    await forward_to_admin(message)
+
+# ──────────────────────────────────────────────
+# Заглушка веб-сервера для Render
+# ──────────────────────────────────────────────
+
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain; charset=utf-8")
+        self.end_headers()
+        self.wfile.write("Бот работает!".encode("utf-8"))
+
+    def log_message(self, format, *args):
+        return
+
+def run_health_check_server():
+    server_address = ("", PORT)
+    httpd = HTTPServer(server_address, HealthCheckHandler)
+    logger.info(f"Встроенный веб-сервер запущен на порту {PORT}")
+    httpd.serve_forever()
+
+# ──────────────────────────────────────────────
+# Запуск
+# ──────────────────────────────────────────────
+
+async def setup_commands() -> None:
+    user_commands = [
+        BotCommand(command="start",     description="👋 Начать диалог"),
+        BotCommand(command="chat",      description=f"{BTN_CHAT}"),
+        BotCommand(command="luck",      description="🎲 Кинуть кость"),
+        BotCommand(command="burmalda",  description="🎰 Бурмалда"),
+        BotCommand(command="malfoy",    description="🐍 Спросить Люциуса Малфоя"),
+    ]
+    admin_commands = user_commands + [
+        BotCommand(command="panel", description="⚙️ Панель управления"),
+    ]
+    await bot.set_my_commands(user_commands, scope=BotCommandScopeDefault())
+    if admin_chat_id:
+        try:
+            await bot.set_my_commands(admin_commands, scope=BotCommandScopeChat(chat_id=admin_chat_id))
+        except Exception:
+            pass
+
+async def main() -> None:
+    logger.info("Starting feedback bot...")
+    
+    threading.Thread(target=run_health_check_server, daemon=True).start()
+    
+    await setup_commands()
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
     asyncio.run(main())
