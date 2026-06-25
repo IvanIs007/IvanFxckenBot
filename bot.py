@@ -3,6 +3,7 @@ import logging
 import os
 import sys
 import threading
+import random
 from dataclasses import dataclass, field
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -21,17 +22,29 @@ import aiohttp
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Загрузка переменных окружения с fallback-значениями
+# Загрузка переменных окружения
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "1187881528:AAESwXPEf0HhStxCjzOLA0YXzlxzLQM2mH8")
 ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "IvanIsakau").lstrip("@")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
 PORT = int(os.environ.get("PORT", 10000))
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 
+# Список лучших моделей для роли Малфоя (в порядке приоритета)
+MALFOY_MODELS = [
+    "google/gemma-2-27b-it:free",      # Google Gemma 2 27B - очень умная
+    "google/gemma-2-9b-it:free",       # Google Gemma 2 9B - быстрая
+    "meta-llama/llama-3.2-3b-instruct:free",  # Meta Llama 3.2 3B
+    "meta-llama/llama-3.1-8b-instruct:free",  # Meta Llama 3.1 8B
+    "mistralai/mistral-7b-instruct:free",     # Mistral 7B
+    "nvidia/llama-3.1-nemotron-70b-instruct:free", # Nvidia Nemotron 70B - очень мощная
+    "qwen/qwen-2-7b-instruct:free",     # Qwen 2 7B
+    "deepseek/deepseek-chat:free",      # DeepSeek Chat
+]
+
 logger.info(f"🔑 BOT_TOKEN: {BOT_TOKEN[:15]}...")
 logger.info(f"👑 ADMIN: @{ADMIN_USERNAME}")
 logger.info(f"🌐 PORT: {PORT}")
-logger.info(f"🤖 OpenRouter API: {'✅' if OPENROUTER_API_KEY else '❌ (не задан)'}")
+logger.info(f"🤖 Доступно моделей: {len(MALFOY_MODELS)}")
 
 bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
@@ -44,13 +57,12 @@ active_chat_users: set[int] = set()
 
 USERS_PER_PAGE = 10
 
-# Текст кнопок (как команды)
+BTN_START     = "👋 Старт"
 BTN_CHAT      = "🤫 Чат с поддержкой"
-BTN_STOP      = "🛑 Завершить диалог"
 BTN_LUCK      = "🎲 Кинуть кость"
 BTN_BURMALDA  = "🎰 Бурмалда"
-BTN_START     = "👋 Старт"
 BTN_MALFOY    = "🐍 Малфой"
+BTN_STOP      = "🛑 Завершить диалог"
 
 MALFOY_PROMPT = """Ты — Люциус Малфой, чистокровный волшебник, аристократ, бывший Пожиратель Смерти. 
 Ты высокомерен, надменен, презираешь маглов и полукровок. 
@@ -82,7 +94,6 @@ async def is_user_filter(message: Message) -> bool:
     return not await is_admin_filter(message)
 
 def user_keyboard() -> ReplyKeyboardMarkup:
-    """Клавиатура с командами бота"""
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text=BTN_START)],
@@ -91,17 +102,16 @@ def user_keyboard() -> ReplyKeyboardMarkup:
             [KeyboardButton(text=BTN_MALFOY)],
         ],
         resize_keyboard=True,
-        input_field_placeholder="Выбери команду...",
+        input_field_placeholder="Выбери действие...",
     )
 
 def chat_keyboard() -> ReplyKeyboardMarkup:
-    """Клавиатура для режима чата"""
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text=BTN_STOP)],
         ],
         resize_keyboard=True,
-        input_field_placeholder="Напиши сообщение...",
+        input_field_placeholder="Напиши сообщение поддержке...",
     )
 
 def admin_panel_keyboard() -> InlineKeyboardMarkup:
@@ -129,16 +139,23 @@ def users_page_keyboard(page: int, total_pages: int) -> InlineKeyboardMarkup:
     ])
 
 async def get_malfoy_response() -> str:
-    """Запрашивает ответ от Gemma через OpenRouter API"""
+    """Запрашивает ответ от случайной нейросети через OpenRouter API"""
     if not OPENROUTER_API_KEY:
-        import random
         fallback_quotes = [
             "Мой отец услышит об этом!",
             "Чистота крови — вот что отличает нас от этих... маглов.",
             "Ты хотя бы знаешь, с кем разговариваешь? Я — Люциус Малфой.",
             "В этом мире есть вещи похуже смерти. Например, позор для семьи.",
+            "Твоё присутствие здесь оскорбляет мой род. Убирайся.",
+            "Думаешь, я стал Пожирателем Смерти ради забавы? У меня были причины.",
+            "Мой сын Драко стоит десяти таких, как ты.",
+            "Запомни: Малфои всегда держат слово. И свою палочку наготове.",
         ]
         return random.choice(fallback_quotes)
+
+    # Выбираем случайную модель из списка
+    selected_model = random.choice(MALFOY_MODELS)
+    logger.info(f"🎲 Выбрана модель: {selected_model}")
 
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
@@ -148,7 +165,7 @@ async def get_malfoy_response() -> str:
     }
     
     payload = {
-        "model": "google/gemma-2-9b-it:free",  # Gemma 2 9B (бесплатная)
+        "model": selected_model,
         "messages": [
             {"role": "system", "content": MALFOY_PROMPT},
             {"role": "user", "content": "Скажи что-нибудь в своём стиле, Люциус."}
@@ -167,13 +184,56 @@ async def get_malfoy_response() -> str:
             ) as response:
                 if response.status == 200:
                     data = await response.json()
+                    model_used = data.get("model", selected_model)
+                    logger.info(f"✅ Ответ от модели: {model_used}")
                     return data["choices"][0]["message"]["content"].strip()
                 else:
                     logger.error(f"OpenRouter API error: {response.status}")
-                    return "Очевидно, даже нейросети боятся меня. Попробуйте позже."
+                    # Пробуем другую модель при ошибке
+                    return await fallback_model_response()
     except Exception as e:
         logger.error(f"OpenRouter API error: {e}")
-        return "Что-то пошло не так. Даже магия Малфоев иногда даёт сбой."
+        return await fallback_model_response()
+
+async def fallback_model_response() -> str:
+    """Запасной вариант с другой моделью"""
+    try:
+        # Пробуем самую надёжную модель
+        headers = {
+            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": "google/gemma-2-9b-it:free",
+            "messages": [
+                {"role": "system", "content": MALFOY_PROMPT},
+                {"role": "user", "content": "Скажи что-нибудь."}
+            ],
+            "max_tokens": 100,
+            "temperature": 0.9,
+        }
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers=headers,
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    return data["choices"][0]["message"]["content"].strip()
+    except:
+        pass
+    
+    # Если всё плохо - возвращаем случайную цитату
+    fallback_quotes = [
+        "Мой отец услышит об этом!",
+        "Чистота крови — вот что отличает нас от этих... маглов.",
+        "Ты хотя бы знаешь, с кем разговариваешь? Я — Люциус Малфой.",
+        "В этом мире есть вещи похуже смерти. Например, позор для семьи.",
+    ]
+    return random.choice(fallback_quotes)
 
 @dp.message(CommandStart(), is_admin_filter)
 async def cmd_start_admin(message: Message) -> None:
@@ -588,7 +648,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
                 <div class="snake">🐍</div>
                 <h1>Malfoy Bot</h1>
                 <div class="status">✅ Работает</div>
-                <div class="model">🤖 Google Gemma 2 9B</div>
+                <div class="model">🤖 Мульти-нейросеть</div>
                 <p>Люциус Малфой следит за порядком...</p>
             </div>
         </body>
@@ -633,15 +693,18 @@ async def setup_commands() -> None:
 
 async def main() -> None:
     logger.info("🚀 Запуск Malfoy Bot...")
-    logger.info("🤖 Используется модель: Google Gemma 2 9B")
+    logger.info(f"🤖 Доступно моделей: {len(MALFOY_MODELS)}")
     
+    # Запускаем веб-сервер в отдельном потоке
     web_thread = threading.Thread(target=run_web_server, daemon=True)
     web_thread.start()
     logger.info("💓 Health-check сервер запущен")
     
+    # Удаляем вебхук и сбрасываем pending updates
     await bot.delete_webhook(drop_pending_updates=True)
-    logger.info("🔄 Вебхуки очищены")
+    logger.info("🔄 Вебхуки очищены, pending updates сброшены")
     
+    # Настраиваем команды
     await setup_commands()
     logger.info("⚙️ Команды настроены")
     
