@@ -38,6 +38,7 @@ greeting_text = "Ух ты, новенький! Обычно люди убега
 forward_map: dict[int, int] = {}
 admin_chat_id: int | None = ADMIN_ID if ADMIN_ID != 0 else None
 active_chat_users: set[int] = set()
+malfoy_chat_users: set[int] = set()  # Пользователи в диалоге с Малфоем
 USERS_PER_PAGE = 10
 
 # Кнопки
@@ -46,16 +47,19 @@ BTN_CHAT = "🤫 Чат с поддержкой"
 BTN_LUCK = "🎲 Кинуть кость"
 BTN_BURMALDA = "🎰 Бурмалда"
 BTN_MALFOY = "🐍 Малфой"
+BTN_MALFOY_CHAT = "💬 Диалог с Малфоем"
 BTN_STOP = "🛑 Завершить диалог"
+BTN_STOP_MALFOY = "🚪 Покинуть Малфоя"
 
 MALFOY_SYSTEM_PROMPT = """Ты — Люциус Малфой, чистокровный волшебник, аристократ, бывший Пожиратель Смерти. 
 Ты высокомерен, надменен, презираешь маглов и полукровок. 
 Ты говоришь изысканно, но язвительно. Ты всегда напоминаешь о чистоте крови и величии рода Малфоев.
-Выдай случайную фразу в стиле Люциуса Малфоя: это может быть цитата, насмешка, напутствие или философское высказывание.
-Чередуй длину ответов: иногда 1-2 предложения, иногда 4-5.
-Никогда не используй звёздочки для описания действий. Только прямая речь."""
+Отвечай в стиле Люциуса Малфоя: надменно, презрительно, но изысканно.
+Не используй звёздочки для описания действий. Только прямая речь.
+Можешь использовать обращения: "магл", "грязнокровка", "жалкий человек".
+Иногда упоминай своего сына Драко, поместье Малфой-мэнор, Министерство магии, Тёмного Лорда."""
 
-MALFOY_USER_PROMPTS = [
+MALFOY_RANDOM_PROMPTS = [
     "Презрительно выскажись о маглах и их образе жизни.",
     "Расскажи о величии и богатстве рода Малфоев.",
     "Дай надменный совет молодому волшебнику о важности чистокровности.",
@@ -67,6 +71,9 @@ MALFOY_USER_PROMPTS = [
     "Дай характеристику Хогвартсу и факультету Слизерин.",
     "Расскажи о своём поместье Малфой-мэнор.",
 ]
+
+# История диалогов с Малфоем
+malfoy_history: dict[int, list[dict]] = {}
 
 @dataclass
 class UserInfo:
@@ -83,6 +90,9 @@ total_messages: int = 0
 class AdminStates(StatesGroup):
     waiting_for_greeting = State()
 
+class MalfoyStates(StatesGroup):
+    chatting = State()
+
 async def is_admin_filter(message: Message) -> bool:
     if ADMIN_ID and message.from_user and message.from_user.id == ADMIN_ID:
         return True
@@ -96,7 +106,7 @@ def user_keyboard():
         [KeyboardButton(text=BTN_START)],
         [KeyboardButton(text=BTN_CHAT)],
         [KeyboardButton(text=BTN_LUCK), KeyboardButton(text=BTN_BURMALDA)],
-        [KeyboardButton(text=BTN_MALFOY)],
+        [KeyboardButton(text=BTN_MALFOY), KeyboardButton(text=BTN_MALFOY_CHAT)],
     ]
     return ReplyKeyboardMarkup(
         keyboard=kb,
@@ -110,6 +120,14 @@ def chat_keyboard():
         keyboard=kb,
         resize_keyboard=True,
         input_field_placeholder="Напиши сообщение..."
+    )
+
+def malfoy_chat_keyboard():
+    kb = [[KeyboardButton(text=BTN_STOP_MALFOY)]]
+    return ReplyKeyboardMarkup(
+        keyboard=kb,
+        resize_keyboard=True,
+        input_field_placeholder="Напиши Малфою..."
     )
 
 def admin_panel_keyboard():
@@ -136,13 +154,11 @@ def users_page_keyboard(page: int, total_pages: int):
         [InlineKeyboardButton(text="↩️ Панель", callback_data="back_panel")],
     ])
 
-async def get_malfoy_response():
-    """Получает ответ от DeepSeek API"""
+async def call_deepseek(messages: list[dict]) -> str:
+    """Вызов DeepSeek API"""
     if not DEEPSEEK_API_KEY:
         return random.choice(FALLBACK_QUOTES)
 
-    user_prompt = random.choice(MALFOY_USER_PROMPTS)
-    
     headers = {
         "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
         "Content-Type": "application/json",
@@ -150,11 +166,8 @@ async def get_malfoy_response():
     
     payload = {
         "model": "deepseek-chat",
-        "messages": [
-            {"role": "system", "content": MALFOY_SYSTEM_PROMPT},
-            {"role": "user", "content": user_prompt}
-        ],
-        "max_tokens": random.randint(100, 300),
+        "messages": messages,
+        "max_tokens": 300,
         "temperature": 0.9,
     }
     
@@ -164,19 +177,48 @@ async def get_malfoy_response():
                 "https://api.deepseek.com/v1/chat/completions",
                 headers=headers,
                 json=payload,
-                timeout=aiohttp.ClientTimeout(total=15)
+                timeout=aiohttp.ClientTimeout(total=20)
             ) as response:
                 if response.status == 200:
                     data = await response.json()
-                    content = data["choices"][0]["message"]["content"].strip()
-                    content = content.replace("*", "")
-                    return content
+                    return data["choices"][0]["message"]["content"].strip().replace("*", "")
                 else:
                     logger.error(f"DeepSeek API error: {response.status}")
                     return random.choice(FALLBACK_QUOTES)
     except Exception as e:
         logger.error(f"DeepSeek API error: {e}")
         return random.choice(FALLBACK_QUOTES)
+
+async def get_malfoy_response() -> str:
+    """Случайная фраза Малфоя"""
+    messages = [
+        {"role": "system", "content": MALFOY_SYSTEM_PROMPT},
+        {"role": "user", "content": random.choice(MALFOY_RANDOM_PROMPTS)}
+    ]
+    return await call_deepseek(messages)
+
+async def get_malfoy_chat_response(user_id: int, user_message: str) -> str:
+    """Ответ Малфоя в диалоге"""
+    # Инициализируем историю если нужно
+    if user_id not in malfoy_history:
+        malfoy_history[user_id] = [
+            {"role": "system", "content": MALFOY_SYSTEM_PROMPT}
+        ]
+    
+    # Добавляем сообщение пользователя
+    malfoy_history[user_id].append({"role": "user", "content": user_message})
+    
+    # Ограничиваем историю 10 последними сообщениями
+    if len(malfoy_history[user_id]) > 11:  # system + 10 сообщений
+        malfoy_history[user_id] = [malfoy_history[user_id][0]] + malfoy_history[user_id][-10:]
+    
+    # Получаем ответ
+    response = await call_deepseek(malfoy_history[user_id])
+    
+    # Добавляем ответ в историю
+    malfoy_history[user_id].append({"role": "assistant", "content": response})
+    
+    return response
 
 FALLBACK_QUOTES = [
     "Мой отец услышит об этом! Твоя дерзость не останется безнаказанной, уверяю тебя.",
@@ -186,9 +228,6 @@ FALLBACK_QUOTES = [
     "Маглы со своими технологиями... Они даже не представляют, какая сила существует рядом с ними. Жалкие создания.",
     "Малфой-мэнор стоит больше, чем всё имущество твоей семьи за десять поколений. И это лишь малая часть нашего состояния.",
     "Тёмный Лорд понимал истинный порядок вещей. Маги должны править маглами, а не прятаться от них.",
-    "Знаешь, что отличает Малфоев от других? Мы не просто говорим о власти — мы её берём. Без колебаний.",
-    "Слизерин всегда был оплотом чистокровных волшебников. Хогвартс должен быть благодарен, что такие семьи, как моя, всё ещё посылают туда своих детей.",
-    "В этом мире есть вещи похуже смерти. Например, позор для семьи. Малфои никогда не испытывали позора, и я не допущу этого сейчас.",
 ]
 
 # =============================================
@@ -281,6 +320,14 @@ async def cmd_malfoy(message: Message):
     await thinking.delete()
     await message.answer(f"🐍 {response}")
 
+@dp.message(Command("malfoy_chat"))
+async def cmd_malfoy_chat(message: Message):
+    """Начать диалог с Малфоем"""
+    if message.chat.id in malfoy_chat_users:
+        await leave_malfoy_chat(message)
+    else:
+        await enter_malfoy_chat(message)
+
 @dp.message(Command("panel"))
 async def cmd_panel(message: Message):
     if await is_admin_filter(message):
@@ -294,10 +341,15 @@ async def cmd_panel(message: Message):
 
 @dp.message(F.text == BTN_START)
 async def btn_start(message: Message):
+    # Выходим из всех чатов
+    active_chat_users.discard(message.chat.id)
+    malfoy_chat_users.discard(message.chat.id)
     await message.answer(greeting_text, reply_markup=user_keyboard())
 
 @dp.message(F.text == BTN_CHAT)
 async def btn_chat(message: Message):
+    if message.chat.id in malfoy_chat_users:
+        await leave_malfoy_chat(message)
     if message.chat.id in active_chat_users:
         await leave_chat(message)
     else:
@@ -319,12 +371,60 @@ async def btn_burmalda(message: Message):
 async def btn_malfoy(message: Message):
     await cmd_malfoy(message)
 
+@dp.message(F.text == BTN_MALFOY_CHAT)
+async def btn_malfoy_chat(message: Message):
+    if message.chat.id in malfoy_chat_users:
+        await leave_malfoy_chat(message)
+    else:
+        await enter_malfoy_chat(message)
+
+@dp.message(F.text == BTN_STOP_MALFOY)
+async def btn_stop_malfoy(message: Message):
+    await leave_malfoy_chat(message)
+
+# =============================================
+# ДИАЛОГ С МАЛФОЕМ
+# =============================================
+
+async def enter_malfoy_chat(message: Message):
+    """Вход в диалог с Малфоем"""
+    malfoy_chat_users.add(message.chat.id)
+    active_chat_users.discard(message.chat.id)  # Выходим из чата поддержки
+    
+    # Очищаем историю
+    malfoy_history[message.chat.id] = [
+        {"role": "system", "content": MALFOY_SYSTEM_PROMPT}
+    ]
+    
+    await message.answer(
+        "🐍 *Люциус Малфой обратил на тебя внимание...*\n\n"
+        "*Он смотрит на тебя с презрением, но, кажется, готов выслушать.*\n\n"
+        "Что скажешь ему?",
+        parse_mode="Markdown",
+        reply_markup=malfoy_chat_keyboard()
+    )
+
+async def leave_malfoy_chat(message: Message):
+    """Выход из диалога с Малфоем"""
+    malfoy_chat_users.discard(message.chat.id)
+    if message.chat.id in malfoy_history:
+        del malfoy_history[message.chat.id]
+    
+    await message.answer(
+        "🐍 *Малфой презрительно фыркнул и отвернулся.*\n"
+        "Диалог с Люциусом Малфоем завершён.",
+        parse_mode="Markdown",
+        reply_markup=user_keyboard()
+    )
+
 # =============================================
 # ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 # =============================================
 
 async def enter_chat(message: Message):
     active_chat_users.add(message.chat.id)
+    malfoy_chat_users.discard(message.chat.id)  # Выходим из чата с Малфоем
+    
     await message.answer(
         "О, приватный чат. Ты либо очень смелый, либо очень отчаянный. "
         "В любом случае — я впечатлён твоей наглостью. Спрашивай. "
@@ -465,7 +565,8 @@ async def cb_stats(callback: CallbackQuery):
             f"📊 <b>Статистика</b>\n\n"
             f"👥 Пользователей: <b>{total_users}</b>\n"
             f"💬 Сообщений всего: <b>{total_messages}</b>\n"
-            f"🟢 В чате сейчас: <b>{len(active_chat_users)}</b>\n"
+            f"🟢 В чате поддержки: <b>{len(active_chat_users)}</b>\n"
+            f"🐍 В диалоге с Малфоем: <b>{len(malfoy_chat_users)}</b>\n"
             f"🕐 Последний активный: <b>{last_active.full_name}</b> "
             f"({last_active.last_seen.strftime('%d.%m %H:%M')})\n\n"
             f"🏆 <b>Топ по сообщениям:</b>\n{top_lines}"
@@ -496,7 +597,7 @@ async def cb_users_page(callback: CallbackQuery):
         lines = []
         for u in chunk:
             uname = f"@{u.username}" if u.username else "(без username)"
-            status = "🟢" if u.chat_id in active_chat_users else "⚫️"
+            status = "🟢" if u.chat_id in active_chat_users else "🐍" if u.chat_id in malfoy_chat_users else "⚫️"
             lines.append(
                 f"{status} <b>{u.full_name}</b> {uname}\n"
                 f"  💬 {u.msg_count} сообщ. | 🕐 {u.last_seen.strftime('%d.%m %H:%M')}"
@@ -559,20 +660,33 @@ async def receive_new_greeting(message: Message, state: FSMContext):
 
 @dp.message()
 async def handle_any_message(message: Message):
-    if message.text in [BTN_START, BTN_CHAT, BTN_LUCK, BTN_BURMALDA, BTN_MALFOY, BTN_STOP]:
+    # Игнорируем кнопки
+    if message.text in [BTN_START, BTN_CHAT, BTN_LUCK, BTN_BURMALDA, BTN_MALFOY, BTN_MALFOY_CHAT, BTN_STOP, BTN_STOP_MALFOY]:
         return
     
     if await is_admin_filter(message):
         return
     
+    # Если пользователь в диалоге с Малфоем
+    if message.chat.id in malfoy_chat_users:
+        track_user(message)
+        thinking = await message.answer("🐍 *Малфой задумался...*", parse_mode="Markdown")
+        response = await get_malfoy_chat_response(message.chat.id, message.text)
+        await thinking.delete()
+        await message.answer(f"🐍 {response}", reply_markup=malfoy_chat_keyboard())
+        return
+    
+    # Если пользователь в чате поддержки
     if message.chat.id in active_chat_users:
         track_user(message)
         await forward_to_admin(message)
-    else:
-        await message.answer(
-            "Используй кнопки меню для навигации.",
-            reply_markup=user_keyboard()
-        )
+        return
+    
+    # Если нигде - показываем меню
+    await message.answer(
+        "Используй кнопки меню для навигации.",
+        reply_markup=user_keyboard()
+    )
 
 # =============================================
 # ВЕБ-СЕРВЕР ДЛЯ RENDER
@@ -599,7 +713,8 @@ async def setup_commands():
         BotCommand(command="chat", description="🤫 Чат с поддержкой"),
         BotCommand(command="luck", description="🎲 Кинуть кость"),
         BotCommand(command="burmalda", description="🎰 Бурмалда"),
-        BotCommand(command="malfoy", description="🐍 Малфой"),
+        BotCommand(command="malfoy", description="🐍 Случайная фраза Малфоя"),
+        BotCommand(command="malfoy_chat", description="💬 Диалог с Малфоем"),
     ]
     admin_commands = user_commands + [
         BotCommand(command="panel", description="⚙️ Панель управления"),
